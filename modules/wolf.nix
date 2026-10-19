@@ -656,7 +656,7 @@ in
       };
     };
 
-    # Moonlight clients are on the LAN. Unlike the XMRig API and Glances,
+    # Moonlight clients are on the LAN. Unlike the XMRig API,
     # these ports are not gated on rig.lanCidrs: Moonlight's own pairing
     # (a PIN, then a client certificate) is the access control, and scoping
     # the ports as well would break discovery from a phone on the guest VLAN

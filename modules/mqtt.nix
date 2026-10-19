@@ -100,6 +100,12 @@ let
                    options: ["starting","mining","paused",
                              "shutting-down","offline"] },
 
+          temperature: ({ p: "sensor", name: "CPU temperature",
+                          stat_t: "rig/\($w)/temperature",
+                          uniq_id: "rig-\($w)-temperature",
+                          dev_cla: "temperature", unit_of_meas: "°C",
+                          stat_cla: "measurement" } + $away),
+
           shutdown: ({ p: "button", name: "Shutdown", cmd_t: "rig/\($w)/cmd",
                        uniq_id: "rig-\($w)-shutdown", pl_prs: "shutdown" } + $away)
         }
@@ -168,6 +174,33 @@ let
         || echo starting
     }
 
+    # The CPU package temperature in °C, read straight from hwmon: what XMRig
+    # does not report, and the usual reason a rig quietly loses hashrate.
+    #
+    # By label, never the hottest probe: hwmon also carries the chassis, the
+    # chipset and the DIMMs, and a plain maximum reports the RAM as the CPU as
+    # soon as the miner stops and the package cools. `Package id 0` is Intel's
+    # coretemp, `Tctl`/`Tdie` AMD's k10temp; a driver with no labels at all
+    # (older k10temp) has only temp1. Prints nothing when no CPU driver is
+    # loaded, and the sensor then stays unknown rather than guessing.
+    temperature() {
+      for hw in /sys/class/hwmon/hwmon*; do
+        case "$(cat "$hw/name" 2>/dev/null)" in
+          coretemp|k10temp|zenpower) ;;
+          *) continue ;;
+        esac
+        input="$hw/temp1_input"
+        for label in "$hw"/temp*_label; do
+          case "$(cat "$label" 2>/dev/null)" in
+            "Package id 0"|Tdie|Tctl) input="''${label%_label}_input"; break ;;
+          esac
+        done
+        milli=$(cat "$input" 2>/dev/null) || return 0
+        echo "$((milli / 1000)).$((milli % 1000 / 100))"
+        return 0
+      done
+    }
+
     # Publishing runs beside the subscription rather than after it, because
     # mosquitto_sub does not return while the broker is up. The subscriber is
     # the process that matters -- it holds the session carrying the will, so
@@ -185,6 +218,8 @@ let
 
       while :; do
         pub "$base/state" "$(state)" || true
+        temp=$(temperature)
+        if [ -n "$temp" ]; then pub "$base/temperature" "$temp" || true; fi
         sleep ${toString cfg.interval}
       done
     ) &
@@ -336,8 +371,8 @@ in
     };
 
     passwordFile = lib.mkOption {
-      # str and not path, for the reason spelled out in modules/monitoring.nix:
-      # a Nix path literal is copied into the world-readable store.
+      # str and not path: a Nix path literal is copied into the world-readable
+      # store, publishing the password to every local user.
       type = lib.types.str;
       default = "/etc/mqtt/password";
       description = ''
@@ -471,12 +506,16 @@ in
       };
     };
 
+    # The CPU temperature above reads coretemp, which is not always loaded on
+    # its own. AMD's k10temp is, through PCI autoloading.
+    boot.kernelModules = [ "coretemp" ];
+
     # For `mosquitto_sub -h <broker> -t '#' -v` from the rig itself, which is
     # how you find out whether the fleet's messages look like the protocol
     # says they should.
     environment.systemPackages = [ pkgs.mosquitto ];
 
-    # Same reasoning as the XMRig token and the Glances password: the file
+    # Same reasoning as the XMRig token: the file
     # lives outside the store by design, so its absence is only knowable on
     # the running machine -- and here the unit simply never starts, which is
     # quiet enough to miss.

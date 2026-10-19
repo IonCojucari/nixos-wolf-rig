@@ -193,9 +193,8 @@ ln -sfn "$(readlink -f "$sys")" /dev/rig-system
 
 bold "Secrets"
 umask 077
-install -d -m 755 /mnt/etc/xmrig /mnt/etc/glances /mnt/etc/mqtt
+install -d -m 755 /mnt/etc/xmrig /mnt/etc/mqtt
 openssl rand -hex 24 | tr -d '\n' > /mnt/etc/xmrig/token
-openssl rand -hex 24 | tr -d '\n' > /mnt/etc/glances/password
 [ -n "$mqtt_pw" ] && printf '%s' "$mqtt_pw" > /mnt/etc/mqtt/password
 if [ -n "$admin_pw" ]; then
   printf '%s' "$admin_pw" | openssl passwd -6 -stdin > /mnt/etc/admin.passwd
@@ -203,7 +202,7 @@ else
   echo '!' > /mnt/etc/admin.passwd
 fi
 [ -n "$wallet" ] && printf '%s\n' "$wallet" > /mnt/etc/xmrig/wallet
-chmod 600 /mnt/etc/xmrig/token /mnt/etc/glances/password /mnt/etc/admin.passwd
+chmod 600 /mnt/etc/xmrig/token /mnt/etc/admin.passwd
 [ -f /mnt/etc/mqtt/password ] && chmod 600 /mnt/etc/mqtt/password
 umask 022
 if [ -n "$ssh_key" ]; then

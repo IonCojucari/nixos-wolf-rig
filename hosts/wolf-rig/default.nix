@@ -45,12 +45,11 @@
   networking.useDHCP = lib.mkDefault true;
   networking.networkmanager.enable = false;
 
-  # Required by modules/mining.nix, modules/monitoring.nix and modules/wolf.nix:
-  # the first two open their LAN-only ports with
-  # `networking.firewall.extraInputRules`, which only the nftables backend
-  # applies. Under the default iptables backend those rules are silently
-  # ignored and the default-deny policy blocks Home Assistant from the XMRig
-  # API and Glances.
+  # Required by modules/mining.nix and modules/wolf.nix: mining.nix opens its
+  # LAN-only port with `networking.firewall.extraInputRules`, which only the
+  # nftables backend applies. Under the default iptables backend that rule is
+  # silently ignored and the default-deny policy blocks Home Assistant from
+  # the XMRig API.
   networking.nftables.enable = true;
 
   # DNS over TLS, for the reasons documented at length in the parent flake:

@@ -29,7 +29,6 @@
         modules = [
           ./hosts/${name}
           ./modules/mining.nix
-          ./modules/monitoring.nix
           ./modules/power.nix
           ./modules/mqtt.nix
           ./modules/wolf.nix
@@ -48,7 +47,6 @@
         modules = [
           ./installer/target.nix
           ./modules/mining.nix
-          ./modules/monitoring.nix
           ./modules/power.nix
           ./modules/mqtt.nix
           ./modules/wolf.nix

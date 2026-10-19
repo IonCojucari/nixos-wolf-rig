@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 #
-# Build the --extra-files tree for one rig: the XMRig API token, the Glances
-# API password, the MQTT broker password, and an optional console password
-# for `admin`.
+# Build the --extra-files tree for one rig: the XMRig API token, the MQTT
+# broker password, and an optional console password for `admin`.
 #
 # Usage:  scripts/mk-secrets.sh <rig-name>
 #
@@ -57,15 +56,15 @@ fi
 
 # Anything that fails from here on must leave nothing behind. Half a tree is
 # worse than none: the guard above would then refuse to regenerate it, while
-# the token and the Glances password already exist on disk without ever having
+# the token already exists on disk without ever having
 # been printed -- credentials nobody has and nobody can reissue.
 cleanup() {
   [ -n "${COMPLETE:-}" ] || rm -rf "$DIR"
 }
 trap cleanup EXIT
 
-mkdir -p "$DIR/etc/xmrig" "$DIR/etc/glances" "$DIR/etc/mqtt"
-chmod 755 "$DIR" "$DIR/etc" "$DIR/etc/xmrig" "$DIR/etc/glances" "$DIR/etc/mqtt"
+mkdir -p "$DIR/etc/xmrig" "$DIR/etc/mqtt"
+chmod 755 "$DIR" "$DIR/etc" "$DIR/etc/xmrig" "$DIR/etc/mqtt"
 
 # --------------------------------------------------------------------------
 # XMRig HTTP API bearer token. One per rig: a shared token means one leak
@@ -77,25 +76,9 @@ printf '%s' "$TOKEN" > "$DIR/etc/xmrig/token"
 chmod 600 "$DIR/etc/xmrig/token"
 
 # --------------------------------------------------------------------------
-# Glances HTTP Basic password, for the same reason and on the same terms.
-#
-# Glances' REST API used to answer every RFC1918 address with no credential,
-# while the XMRig API next door required a bearer token — and Glances is the
-# one that serves the process list, the logged-in users and the mounted
-# filesystems. The service now refuses to start without this file.
-#
-# Plaintext on purpose: the rig hashes it into Glances' own salted format at
-# service start (modules/monitoring.nix). Home Assistant needs the plaintext to
-# send Basic auth, so a hash here would help nobody.
-# --------------------------------------------------------------------------
-GLANCES_PASSWORD="$(openssl rand -hex 24)"
-printf '%s' "$GLANCES_PASSWORD" > "$DIR/etc/glances/password"
-chmod 600 "$DIR/etc/glances/password"
-
-# --------------------------------------------------------------------------
 # MQTT broker password.
 #
-# Asked for rather than generated, unlike the two above, and that is the whole
+# Asked for rather than generated, unlike the token above, and that is the whole
 # difference: this one credential belongs to the broker, not to the rig. One
 # account (`miner`) on the Mosquitto add-on serves the whole fleet, so a value
 # invented here would be a value the broker rejects — and the symptom is a rig
@@ -177,7 +160,6 @@ cat <<EOF
 
 Wrote $DIR
   etc/xmrig/token       0600  XMRig API bearer token
-  etc/glances/password  0600  Glances HTTP Basic password
   etc/mqtt/password     0600  $([ -n "$MQTT_SET" ] && echo "MQTT password for user 'miner'" || echo 'not written (rig will not announce itself)')
   etc/admin.passwd        0600  $([ "$HASH" = '!' ] && echo 'locked (no console password)' || echo 'SHA-512 crypt hash')
 
@@ -190,12 +172,10 @@ Install with:
     --no-substitute-on-destination
 
 Home Assistant: add the rig in Settings -> Devices & Services -> XMRig and
-paste both of these into the form (the integration stores them in the config
+paste this into the form (the integration stores them in the config
 entry, there is no secrets.yaml key to add):
 
   Access token      $TOKEN
-  Glances username  glances
-  Glances password  $GLANCES_PASSWORD
 
 The rig's power buttons and its presence need nothing pasted anywhere: with
 the MQTT password in place it publishes its own Home Assistant device on

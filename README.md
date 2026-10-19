@@ -5,7 +5,7 @@ game-streaming host for Moonlight clients, and a Monero miner that uses the
 cores nobody is streaming on.
 
 Derived from [nixos-xmrig-flake](https://github.com/IonCojucari/nixos-xmrig-flake).
-The mining, monitoring, power and MQTT modules are vendored from it unchanged;
+The mining, power and MQTT modules are vendored from it unchanged;
 what is new here is `modules/wolf.nix`, `modules/gaming-guard.nix`, and a
 two-disk layout.
 
@@ -126,7 +126,7 @@ nix run github:nix-community/nixos-anywhere -- \
 ```
 
 Build `./secrets/<host>` with `scripts/mk-secrets.sh <host>` — it writes the XMRig API token,
-the Glances password, the MQTT password and the console password hash. These are
+the MQTT password and the console password hash. These are
 shipped out-of-store because everything in `/nix/store` is world-readable.
 
 nixos-anywhere kexecs the running CachyOS into an in-RAM installer, so no boot

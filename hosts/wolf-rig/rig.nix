@@ -113,7 +113,6 @@
 
   };
 
-  rig.monitoring.enable = true;
 
   rig.power = {
     enable = true;
