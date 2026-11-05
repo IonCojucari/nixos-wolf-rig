@@ -1,109 +1,133 @@
-{ config, lib, ... }:
+{ config, lib, pkgs, ... }:
 
-# GitLab CE in a container, managed as a systemd unit by NixOS.
+# GitLab CE from nixpkgs (services.gitlab), behind nginx.
 #
-# Why a container and not services.gitlab: the upstream omnibus image is what
-# GitLab supports and documents, upgrades are a tag bump, and nothing about the
-# host's own Ruby/Postgres/Redis versions matters.
+# GitLab itself only listens on a unix socket; nginx is the one public listener,
+# so unlike a published container port it IS subject to networking.firewall.
+# Port 80 is opened to rig.lanCidrs and the tailnet only (see lan.nix).
 #
-# Network exposure: Docker publishes container ports through its own
-# nftables/iptables chains, which are evaluated before NixOS's INPUT rules.
-# `networking.firewall` therefore does NOT restrict these ports. They are
-# reachable from whatever network the host is on, so `listenAddress` is the
-# only knob that narrows them. A fresh GitLab also allows self-registration:
-# turn that off under Admin > Settings > General > Sign-up restrictions after
-# the first login.
+# Secrets. services.gitlab needs seven secret files plus the initial root
+# password. The seven are generated once, on first start, by
+# gitlab-secrets-init below and never overwritten: GitLab encrypts database
+# columns with them, so regenerating them makes that data unreadable. They live
+# in `secretsDir`, readable only by the gitlab user, and must be backed up
+# together with the database (`gitlab-backup` does not include them).
 #
-# First start downloads a ~2.5 GB image and then initialises for several
-# minutes. The initial root password is written to
-# <dataDir>/config/initial_root_password and deleted by GitLab after 24 h.
+# The root password is deliberately NOT generated: it is yours to choose.
+# Create <secretsDir>/root-password (any owner; gitlab-secrets-init fixes owner and
+# mode) before the first start. It is only read while the database is first seeded.
+#
+# Git over SSH is not set up. gitlab-shell needs the host's sshd to run an
+# AuthorizedKeysCommand for the gitlab user, which changes how the machine's
+# SSH daemon authenticates; clone over HTTP with a token until that is wanted.
 
 let
   cfg = config.rig.gitlab;
+  secret = name: "${cfg.secretsDir}/${name}";
 in
 {
+  imports = [ ./lan.nix ];
+
   options.rig.gitlab = {
-    enable = lib.mkEnableOption "GitLab CE in a container";
+    enable = lib.mkEnableOption "GitLab CE (services.gitlab) behind nginx";
 
-    externalUrl = lib.mkOption {
+    host = lib.mkOption {
       type = lib.types.str;
-      example = "http://gitlab.example.lan";
+      example = "gitlab.example.lan";
       description = ''
-        URL users type to reach GitLab. Clone URLs and links in the UI are built
-        from it, so it must match how clients actually connect. If the host gets
-        its address by DHCP and that address changes, update this and switch, or
-        reserve the address in the router.
+        Host name or address users type to reach GitLab. Clone URLs and links in
+        the UI are built from it, so it must match how clients actually
+        connect. If the host gets its address by DHCP and that address changes,
+        update this and switch, or reserve the address in the router.
       '';
     };
 
-    version = lib.mkOption {
-      type = lib.types.str;
-      default = "19.5.3-ce.0";
-      description = ''
-        gitlab/gitlab-ce image tag. Pinned: a floating tag would upgrade GitLab
-        on any container restart, and GitLab only supports stepping through
-        specific versions. Upgrade by bumping this one minor at a time.
-      '';
-    };
-
-    dataDir = lib.mkOption {
-      type = lib.types.path;
-      default = "/var/lib/gitlab-ce";
-      description = "Holds config/, logs/ and data/ (repositories, database, LFS, uploads).";
-    };
-
-    httpPort = lib.mkOption {
+    port = lib.mkOption {
       type = lib.types.port;
       default = 80;
-      description = "Host port for the web UI.";
+      description = "Port nginx listens on (plain HTTP).";
     };
 
-    sshPort = lib.mkOption {
-      type = lib.types.port;
-      default = 2222;
-      description = "Host port for Git over SSH. 22 belongs to the host's own sshd.";
+    secretsDir = lib.mkOption {
+      type = lib.types.path;
+      default = "/var/lib/gitlab-secrets";
+      description = "Directory holding the generated secret files and root-password.";
     };
 
-    listenAddress = lib.mkOption {
+    backupAt = lib.mkOption {
       type = lib.types.str;
-      default = "0.0.0.0";
-      example = "192.0.2.10";
-      description = "Host address the published ports bind to. See the note above on the firewall.";
+      default = "03:30";
+      description = "systemd calendar expression for the nightly gitlab-backup run.";
     };
   };
 
   config = lib.mkIf cfg.enable {
-    virtualisation.oci-containers.backend = "docker";
-    virtualisation.oci-containers.containers.gitlab = {
-      image = "gitlab/gitlab-ce:${cfg.version}";
-      hostname = lib.removePrefix "https://" (lib.removePrefix "http://" cfg.externalUrl);
-      ports = [
-        "${cfg.listenAddress}:${toString cfg.httpPort}:80"
-        "${cfg.listenAddress}:${toString cfg.sshPort}:22"
-      ];
-      volumes = [
-        "${cfg.dataDir}/config:/etc/gitlab"
-        "${cfg.dataDir}/logs:/var/log/gitlab"
-        "${cfg.dataDir}/data:/var/opt/gitlab"
-      ];
-      environment.GITLAB_OMNIBUS_CONFIG = ''
-        external_url '${cfg.externalUrl}'
-        gitlab_rails['gitlab_shell_ssh_port'] = ${toString cfg.sshPort}
-        gitlab_rails['lfs_enabled'] = true
-      '';
-      # GitLab's own docs ask for more than Docker's 64 MB default /dev/shm.
-      extraOptions = [ "--shm-size=256m" ];
+    services.gitlab = {
+      enable = true;
+      host = cfg.host;
+      port = cfg.port;
+      https = false;
+      initialRootPasswordFile = secret "root-password";
+      secrets = {
+        secretFile = secret "secret";
+        dbFile = secret "db";
+        otpFile = secret "otp";
+        jwsFile = secret "jws";
+        activeRecordPrimaryKeyFile = secret "ar-primary";
+        activeRecordDeterministicKeyFile = secret "ar-deterministic";
+        activeRecordSaltFile = secret "ar-salt";
+      };
+      backup = {
+        startAt = cfg.backupAt;
+        keepTime = 24 * 7; # hours
+      };
     };
 
-    systemd.tmpfiles.rules = [
-      "d ${cfg.dataDir} 0755 root root -"
-      "d ${cfg.dataDir}/config 0755 root root -"
-      "d ${cfg.dataDir}/logs 0755 root root -"
-      "d ${cfg.dataDir}/data 0755 root root -"
-    ];
+    services.nginx = {
+      enable = true;
+      recommendedGzipSettings = true;
+      recommendedOptimisation = true;
+      recommendedProxySettings = true;
+      virtualHosts.${cfg.host} = {
+        listen = [ { addr = "0.0.0.0"; port = cfg.port; } ];
+        locations."/" = {
+          proxyPass = "http://unix:/run/gitlab/gitlab-workhorse.socket";
+          proxyWebsockets = true;
+          # Pushes can be large (git objects, LFS); the default 1 MB would reject them.
+          extraConfig = "client_max_body_size 0;";
+        };
+      };
+    };
 
-    # The first start pulls the image, which outlasts systemd's default
-    # 90 s start timeout and would leave the unit in a restart loop.
-    systemd.services.docker-gitlab.serviceConfig.TimeoutStartSec = lib.mkForce "30min";
+    # LAN and tailnet only, like the other services on this host.
+    networking.firewall.interfaces.tailscale0.allowedTCPPorts = [ cfg.port ];
+    networking.firewall.extraInputRules =
+      lib.optionalString (config.rig.lanCidrs != [ ]) ''
+        ip saddr { ${lib.concatStringsSep ", " config.rig.lanCidrs} } tcp dport ${toString cfg.port} accept
+      '';
+
+    systemd.services.gitlab-secrets-init = {
+      description = "Generate GitLab secrets on first start";
+      wantedBy = [ "multi-user.target" ];
+      before = [ "gitlab-config.service" "gitlab-db-config.service" ];
+      requiredBy = [ "gitlab-config.service" ];
+      path = [ pkgs.coreutils pkgs.openssl ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        UMask = "0077";
+      };
+      script = ''
+        dir=${lib.escapeShellArg cfg.secretsDir}
+        install -d -m 0700 -o ${config.services.gitlab.user} -g ${config.services.gitlab.group} "$dir"
+        gen() {
+          [ -e "$dir/$1" ] || { tr -dc A-Za-z0-9 < /dev/urandom | head -c 128 > "$dir/$1"; }
+        }
+        for name in secret db otp ar-primary ar-deterministic ar-salt; do gen "$name"; done
+        [ -e "$dir/jws" ] || openssl genrsa -out "$dir/jws" 2048 2>/dev/null
+        chown ${config.services.gitlab.user}:${config.services.gitlab.group} "$dir"/*
+        chmod 0400 "$dir"/*
+      '';
+    };
   };
 }
