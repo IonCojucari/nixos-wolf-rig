@@ -314,12 +314,15 @@ in
         ExecStart = "${guard}";
         Restart = "always";
         RestartSec = 5;
-
-        # The guard is the thing that decides whether this machine games well.
-        # If it dies, mining wins by default, so make it loud rather than
-        # letting systemd give up after the default burst limit.
-        StartLimitIntervalSec = 0;
       };
+
+      # The guard is the thing that decides whether this machine games well.
+      # If it dies, mining wins by default, so make it loud rather than
+      # letting systemd give up after the default burst limit. This belongs in
+      # [Unit], not [Service]: systemd ignored it there ("Unknown key
+      # 'StartLimitIntervalSec' in section [Service]"), so the limit was never
+      # actually lifted.
+      unitConfig.StartLimitIntervalSec = 0;
 
       environment.GRACE = toString cfg.graceSeconds;
     };
