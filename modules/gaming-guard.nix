@@ -97,7 +97,10 @@ let
     uncap=${if mining.efficiency.enable then "${rigCpuUncap}" else "${pkgs.coreutils}/bin/true"}
     capped=${if mining.efficiency.enable then "yes" else "no"}
 
-    # Count Wolf session containers, excluding the Wolf daemon itself. The
+    # Count the containers that mean "the machine is busy": by default Wolf
+    # session containers, plus whatever other modules add to
+    # rig.gamingGuard.busyContainerPrefixes (the GitLab runner adds its job
+    # containers). Excluding the Wolf daemon itself. The
     # daemon is named `wolf` by virtualisation.oci-containers; the sessions it
     # spawns are named WolfSteam_*, Wolf-UI_*, WolfRetroarch_* and so on, all
     # capital-W prefixed.
@@ -127,7 +130,7 @@ let
         echo -1
         return
       }
-      echo "$out" | ${pkgs.gnugrep}/bin/grep -c '^Wolf' || true
+      echo "$out" | ${pkgs.gnugrep}/bin/grep -c -E ${lib.escapeShellArg "^(${lib.concatStringsSep "|" cfg.busyContainerPrefixes})"} || true
     }
 
     state=unknown
@@ -234,6 +237,26 @@ in
   options.rig.gamingGuard = {
     enable = lib.mkEnableOption "stop mining while a Wolf streaming session is active";
 
+    busyContainerPrefixes = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "runner-" ];
+      description = ''
+        "Wolf" is always in this list (added below, as a definition rather than
+        as the default: a list option's default is replaced, not extended, the
+        moment another module defines it, which would silently drop Wolf).
+
+        A running container whose name starts with any of these makes the guard
+        treat the machine as busy: mining stops, the CPU cap is lifted, and
+        both come back after graceSeconds without such a container.
+
+        "Wolf" matches the per-client session containers (the daemon is named
+        `wolf`, lower case, so it never matches). Other modules append their
+        own, e.g. "runner-" for GitLab CI jobs, which are as sensitive to
+        sixteen RandomX threads and a capped clock as a game is.
+      '';
+    };
+
     graceSeconds = lib.mkOption {
       type = lib.types.ints.unsigned;
       default = 60;
@@ -256,6 +279,8 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    rig.gamingGuard.busyContainerPrefixes = [ "Wolf" ];
+
     assertions = [{
       assertion = mining.enable;
       message = ''

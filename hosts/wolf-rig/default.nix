@@ -1,7 +1,7 @@
 { config, pkgs, lib, ... }:
 
 {
-  imports = [ ./rig.nix ./disks.nix ../../modules/gitlab.nix ];
+  imports = [ ./rig.nix ./disks.nix ../../modules/gitlab.nix ../../modules/gitlab-runner.nix ];
 
   # ---------------------------------------------------------------------------
   # Boot / kernel
