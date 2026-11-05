@@ -59,6 +59,8 @@ in
       services.docker = {
         authenticationTokenConfigFile = toString cfg.tokenFile;
         executor = "docker";
+        # 1 makes job pickup wait out the server's long-poll timeout (runner warns about it).
+        requestConcurrency = 4;
         dockerImage = cfg.defaultImage;
         # Rust toolchain images are large; pulling them on every job would dominate short jobs.
         dockerPullPolicy = "if-not-present";
