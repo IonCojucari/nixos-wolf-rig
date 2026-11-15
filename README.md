@@ -90,6 +90,37 @@ reserves ~5.5 GiB of hugepages at boot).
 
 Build the ISO yourself with `nix build .#installerIso`.
 
+## Private settings
+
+Nothing personal has to be written into this repository. The admin login and
+SSH keys, the wallet, disk IDs, addresses and any module of your own go in a
+folder outside it, `/etc/nixos-private`, which is plugged in as the flake
+input `private`:
+
+```
+cp -r private.example /etc/nixos-private     # then edit hosts/<host>/rig.toml
+sudo rig-rebuild switch
+```
+
+`rig-rebuild` is `nixos-rebuild --flake /etc/nixos#<hostname>` with
+`--override-input private git+file:///etc/nixos-private` added (`path:` if
+the folder is not a git repository). For any other `nix` command on the real
+configuration, pass the same `--override-input`. Without it the flake uses
+the empty template in `private.example/`, and the build stops on the
+placeholder assertions.
+
+In `/etc/nixos-private/hosts/<host>/`:
+
+- `rig.toml` — everything under `[rig]` is laid over the `rig.*` options of
+  `hosts/<host>` and wins, so any of them can be set there
+  (`[rig.admin]`, `[rig.disk]`, `[rig.mining.pool]`, `[rig.wolf]`, ...).
+- `*.nix` — each file is loaded as one more NixOS module for that host.
+
+It is not a place for passwords or tokens: the folder is copied to
+`/nix/store`, which every local user can read. Those stay in the files
+`scripts/mk-secrets.sh` writes. If the folder is a git repository, new files
+must be `git add`ed before a rebuild sees them.
+
 ## Before you install
 
 **Every disk named in `hosts/<host>/disks.nix` is erased, and there is no
@@ -97,16 +128,18 @@ fallback OS.** Get these right first.
 
 1. **New machine?** `scripts/new-host.sh <name>` copies `hosts/wolf-rig` to
    `hosts/<name>` (see [Adding a machine](#adding-a-machine)).
-2. **Set your Monero address** in `hosts/<host>/rig.nix`. The build fails
+2. **Set your Monero address**: `rig.mining.pool.wallet`, in `hosts/<host>/rig.nix`
+   or in the private `rig.toml` (see [Private settings](#private-settings)). The build fails
    while it is the placeholder.
-3. **Confirm the disk `by-id` paths** in `hosts/<host>/disks.nix`:
+3. **Confirm the disk `by-id` paths** in `hosts/<host>/disks.nix` (or `[rig.disk]`
+   in the private `rig.toml`):
    ```
    ssh <host> 'ls -l /dev/disk/by-id/ | grep -v part'
    ```
    With two drives, a mismatch does not fail — it silently installs the
    system onto the game drive. `new-host.sh` leaves `CHANGEME` placeholders
    that the build refuses.
-4. **Check the SSH keys** in `hosts/<host>/default.nix`. sshd is key-only with
+4. **Check the SSH keys** in `rig.admin.sshKeys` (private `rig.toml`). sshd is key-only with
    root login disabled and there is no desktop, so a missing key means a machine
    you cannot reach. An assertion enforces that the list is non-empty; it cannot
    check that the keys are *yours*.

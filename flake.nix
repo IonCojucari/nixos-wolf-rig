@@ -12,9 +12,23 @@
       url = "github:nix-community/disko";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    # Settings that should not be published -- the admin login and SSH keys,
+    # the wallet, addresses, personal modules. The default is the empty
+    # template in this repository; a real machine points it at a folder kept
+    # outside the repository:
+    #
+    #   nixos-rebuild switch --flake /etc/nixos#<host> \
+    #     --override-input private git+file:///etc/nixos-private
+    #
+    # which is what `rig-rebuild switch` runs. See private.example/.
+    private = {
+      url = "path:./private.example";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, disko, ... }:
+  outputs = { self, nixpkgs, disko, private, ... }:
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
@@ -23,6 +37,20 @@
       # Every directory under hosts/ is a machine; adding one needs no edit
       # here (scripts/new-host.sh <name> makes the directory).
       hostNames = lib.attrNames (lib.filterAttrs (_: type: type == "directory") (builtins.readDir ./hosts));
+
+      # hosts/<name>/ in the private folder: rig.toml is laid over the rig.*
+      # options (every value at a priority that beats the host file), and
+      # each *.nix file is one more module.
+      privateModules = name:
+        let
+          dir = "${private}/hosts/${name}";
+          toml = "${dir}/rig.toml";
+          values = lib.optionalAttrs (builtins.pathExists toml) (builtins.fromTOML (builtins.readFile toml));
+          nixFiles = lib.optionals (builtins.pathExists dir)
+            (lib.filter (lib.hasSuffix ".nix") (lib.attrNames (builtins.readDir dir)));
+        in
+        map (f: "${dir}/${f}") nixFiles
+        ++ [{ rig = lib.mapAttrsRecursive (_: lib.mkOverride 90) (values.rig or { }); }];
 
       mkHost = name: lib.nixosSystem {
         inherit system;
@@ -35,6 +63,10 @@
           ./modules/tailscale.nix
           ./modules/gaming-guard.nix
           ./modules/whisper.nix
+          ./modules/admin.nix
+        ]
+        ++ privateModules name
+        ++ [
           disko.nixosModules.disko
           ./modules/disko.nix
         ];

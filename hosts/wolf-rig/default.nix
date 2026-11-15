@@ -102,7 +102,8 @@
   # than Sunshine: each streaming session is a container carrying its own
   # compositor and userspace, so the host never logs anyone in, never starts a
   # display manager, and has no seat for a session to conflict over.
-  services.xserver.enable = false;
+  # mkDefault: a private module may add a remote desktop for administration.
+  services.xserver.enable = lib.mkDefault false;
   hardware.bluetooth.enable = false;
 
   # Audio is likewise per-session -- Wolf starts a PulseAudio container for
@@ -123,7 +124,10 @@
   # desktop), and one more set of credentials to manage.
   #
   # Pairing is a runtime step, not a declarative one -- see the README.
-  users.users.admin = {
+  #
+  # The login name and the keys are rig.admin.* (modules/admin.nix), set from
+  # the private folder; see private.example/.
+  users.users.${config.rig.admin.name} = {
     isNormalUser = true;
     description = "Administrator";
     extraGroups = [ "wheel" "docker" ];
@@ -132,24 +136,20 @@
     # time (scripts/mk-secrets.sh writes it). Out-of-store because everything
     # in /nix/store is world-readable, so a hash committed here would be
     # published to every local user.
-    hashedPasswordFile = "/etc/admin.passwd";
+    hashedPasswordFile = "/etc/${config.rig.admin.name}.passwd";
 
-    openssh.authorizedKeys.keys = [
-      # "ssh-ed25519 AAAA... you@laptop"
-    ];
+    openssh.authorizedKeys.keys = config.rig.admin.sshKeys;
   };
 
   # Membership in `docker` is root-equivalent (the socket will start a
   # container that bind-mounts /), so this is recorded rather than left
-  # implicit: `admin` is a full admin on this box by two independent routes.
+  # implicit: the administrator is a full admin on this box by two independent routes.
 
   # Unprivileged account for Home Assistant, as in the parent flake.
   users.users.ha = {
     isNormalUser = true;
     description = "Home Assistant remote control";
-    openssh.authorizedKeys.keys = [
-      # "ssh-ed25519 AAAA... you@laptop"
-    ];
+    openssh.authorizedKeys.keys = config.rig.homeAssistant.sshKeys;
   };
 
   services.openssh = {
@@ -168,10 +168,10 @@
   assertions = [{
     # The offline installer adds keys at install time through
     # services.openssh.authorizedKeysFiles instead (installer/target.nix).
-    assertion = config.users.users.admin.openssh.authorizedKeys.keys != [ ]
+    assertion = config.rig.admin.sshKeys != [ ]
       || config.services.openssh.authorizedKeysFiles != [ ];
     message = ''
-      users.users.admin has no SSH keys: the installed machine would be
+      rig.admin.sshKeys is empty: the installed machine would be
       unreachable (key-only sshd, PermitRootLogin=no, no desktop, and no
       second OS to boot into).
     '';
@@ -190,7 +190,26 @@
     libva-utils
     vulkan-tools
     radeontop
+    # Link tests from Moonlight clients: iperf3 -c <tailnet address> -u -R -b 60M
+    iperf3
+    # nixos-rebuild for this flake with the private folder plugged in, when
+    # there is one (see private.example/):  sudo rig-rebuild switch
+    (writeShellScriptBin "rig-rebuild" ''
+      private=/etc/nixos-private
+      args=()
+      if [ -d "$private/.git" ]; then
+        # Like the flake itself: only files git tracks are seen.
+        args+=(--override-input private "git+file://$private")
+      elif [ -d "$private" ]; then
+        args+=(--override-input private "path:$private")
+      fi
+      exec nixos-rebuild "$@" --flake "/etc/nixos#$(cat /proc/sys/kernel/hostname)" "''${args[@]}"
+    '')
   ];
+
+  # iperf3 server reachable over the tailnet only.
+  networking.firewall.interfaces.tailscale0.allowedTCPPorts = [ 5201 ];
+  networking.firewall.interfaces.tailscale0.allowedUDPPorts = [ 5201 ];
 
   system.stateVersion = "25.11";
 }

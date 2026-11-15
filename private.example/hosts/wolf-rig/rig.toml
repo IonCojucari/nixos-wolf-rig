@@ -1,0 +1,37 @@
+# Private settings for the host "wolf-rig".
+#
+# This directory is the template for a folder kept OUTSIDE the repository
+# (/etc/nixos-private), so that the repository itself can stay public:
+#
+#   cp -r private.example /etc/nixos-private
+#   rig-rebuild switch          # = nixos-rebuild with the private folder plugged in
+#
+# Everything under [rig] is laid over the rig.* options of hosts/wolf-rig,
+# and wins. Any rig.* option can be set here; the ones below are those that
+# usually differ per owner. Any *.nix file next to this one is loaded as an
+# extra NixOS module for this host.
+#
+# Not for passwords or tokens: this file ends up in /nix/store, which every
+# local user can read. Those stay in the files scripts/mk-secrets.sh writes.
+
+# [rig.admin]
+# name = "admin"
+# sshKeys = [ "ssh-ed25519 AAAA... you@laptop" ]
+
+# [rig.homeAssistant]
+# sshKeys = [ "ssh-ed25519 AAAA... homeassistant" ]
+
+# [rig.disk]
+# system = "/dev/disk/by-id/nvme-..."
+# data = "/dev/disk/by-id/nvme-..."
+
+# [rig.mining.pool]
+# wallet = "4..."
+
+# [rig.mqtt]
+# enable = true
+# broker = "192.168.1.10"
+
+# [rig.wolf]
+# advertiseTailnetRoute = true
+# natTailnetPeers = [ "100.64.0.10" ]

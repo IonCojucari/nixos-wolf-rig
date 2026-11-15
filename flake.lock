@@ -36,10 +36,23 @@
         "type": "github"
       }
     },
+    "private": {
+      "flake": false,
+      "locked": {
+        "path": "./private.example",
+        "type": "path"
+      },
+      "original": {
+        "path": "./private.example",
+        "type": "path"
+      },
+      "parent": []
+    },
     "root": {
       "inputs": {
         "disko": "disko",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "private": "private"
       }
     }
   },

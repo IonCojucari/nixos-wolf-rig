@@ -44,7 +44,8 @@ Created hosts/$name (from hosts/$from). Before installing, edit:
 
   hosts/$name/disks.nix    disk IDs (required; the build fails until set)
   hosts/$name/default.nix  time zone, keymap, CPU microcode (amd/intel),
-                           SSH keys, users
+                           users
+  private rig.toml         admin name and SSH keys (see private.example/)
   hosts/$name/rig.nix      wallet, MQTT broker (or rig.mqtt.enable = false),
                            power.controlUser, advertiseTailnetRoute
 

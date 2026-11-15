@@ -14,20 +14,19 @@
     # (modules/wolf-hw-detect.sh); `journalctl -u wolf-hw-detect` shows what
     # it picked. On this box that is:
     #   render  RX 9070 XT (03:00.0, most VRAM)
-    #   encoder the 9800X3D's iGPU (0e:00.0), see below
+    #   encoder same as render (see below)
     #   LAN     enp9s0 / 192.168.1.50
     #   games   CPUs 0-6,8-14 (core 7 and its SMT sibling 15 kept for Wolf)
     # Pin any of them to a /dev/dri/by-path/... path, an address or a CPU
     # list if detection ever picks wrong.
     renderNode = "auto";
 
-    # Encode on the iGPU: after side-by-side play on 2026-10-11 it felt
-    # better than encoding on the 9070 XT, since it keeps Wolf's colour
-    # conversion and encode off the GPU the game saturates. Trade-offs,
-    # measured the same day: ~10 ms per 2880x1800 frame (~80-90 fps ceiling
-    # at that resolution) and no AV1, so use HEVC in Moonlight. null encodes
-    # on the render GPU (faster per frame, and AV1).
-    encoderNode = "secondary";
+    # Encode on the render GPU (the 9070 XT). The iGPU ("secondary") was tried
+    # on 2026-10-11 and felt better, but its VCN 3.1 encoder page-faulted
+    # under Wolf (amdgpu mmhub fault, client VCN, then a vcn_enc ring timeout
+    # and failed GPU recovery) and hard-froze the box 3-4 times that day.
+    # Do not go back to it unless a newer kernel/Mesa fixes that.
+    encoderNode = null;
 
     internalIp = "auto";
 
