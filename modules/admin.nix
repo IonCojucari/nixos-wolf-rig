@@ -22,6 +22,17 @@
     };
   };
 
+  options.rig.admin.loginSetAtInstall = lib.mkOption {
+    type = lib.types.bool;
+    default = false;
+    description = ''
+      The way in (an SSH key or a console password) is written to the machine
+      by the installer instead of being built into the system. Set by
+      installer/target.nix, whose installer refuses to go on without one;
+      it switches off the check that rig.admin.sshKeys is not empty.
+    '';
+  };
+
   options.rig.homeAssistant.sshKeys = lib.mkOption {
     type = lib.types.listOf lib.types.str;
     default = [ ];

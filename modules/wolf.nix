@@ -769,6 +769,34 @@ in
           [ -n "''${RIG_GAME_CPUS:-}" ] && { systemctl set-property --runtime games.slice AllowedCPUs="''${RIG_GAME_CPUS//,/ }" || echo "wolf-hw-detect: could not set games.slice AllowedCPUs"; }
         '' + lib.optionalString (builtins.elem "lan" cfg.videoPacing.interfaces) ''
           [ -n "''${RIG_LAN_IFACE:-}" ] && { ${pacing.apply} "$RIG_LAN_IFACE" || echo "wolf-hw-detect: pacing on $RIG_LAN_IFACE failed"; }
+        '';
+      };
+
+      # The edits to Wolf's own cfg/config.toml. Wolf owns that file and
+      # writes it back from memory while it runs (a client pairing, for
+      # one), so it is only ever patched while Wolf is stopped:
+      #   - not restarted on switch (a changed value waits for the next Wolf
+      #     start instead of being written under a running Wolf and lost);
+      #   - partOf docker-wolf, so every stop of Wolf stops this unit too and
+      #     every start of Wolf (boot, switch, `systemctl restart
+      #     docker-wolf`) runs it again first.
+      # wolf-av1-padstrip and wolf-steam-library below follow the same rule,
+      # and run one after the other: each rewrites the whole file.
+      wolf-config = {
+        description = "Apply the rig.wolf encoder and FEC settings to Wolf's config.toml";
+        wantedBy = [ "multi-user.target" ];
+        before = [ "docker-wolf.service" ];
+        after = [ "wolf-hw-detect.service" ];
+        partOf = [ "docker-wolf.service" ];
+        restartIfChanged = false;
+        stopIfChanged = false;
+        path = [ pkgs.gnused pkgs.coreutils ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+        };
+        script = ''
+          [ -r /run/wolf/hw.env ] && . /run/wolf/hw.env
         '' + lib.optionalString cfg.encoderQualityFix ''
           # See encoderQualityFix. Only Wolf's VA-API AV1/HEVC pipelines.
           toml=${cfg.stateDir}/cfg/config.toml
@@ -779,8 +807,8 @@ in
           esac
           if [ -n "$tu" ] && [ -f "$toml" ]; then
             sed -i -E "/encoder_pipeline = [']+va(av1|av1lp|h265|h265lp)enc /s/target-usage=[0-9]+/target-usage=$tu/" "$toml" \
-              && echo "wolf-hw-detect: VA AV1/HEVC target-usage=$tu for encoder vendor $RIG_ENCODER_VENDOR" \
-              || echo "wolf-hw-detect: could not update $toml"
+              && echo "wolf-config: VA AV1/HEVC target-usage=$tu for encoder vendor $RIG_ENCODER_VENDOR" \
+              || echo "wolf-config: could not update $toml"
           fi
         '' + lib.optionalString cfg.av1PaddingFix ''
           # See av1PaddingFix. Only Wolf's VA-API AV1 pipelines; the caps
@@ -788,32 +816,32 @@ in
           toml=${cfg.stateDir}/cfg/config.toml
           if [ -f "$toml" ]; then
             sed -i -E "/encoder_pipeline = [']+vaav1(lp)?enc /,/profile=main/s/alignment=frame/alignment=tu/" "$toml" \
-              && echo "wolf-hw-detect: VA AV1 pipelines use alignment=tu" \
-              || echo "wolf-hw-detect: could not update $toml"
+              && echo "wolf-config: VA AV1 pipelines use alignment=tu" \
+              || echo "wolf-config: could not update $toml"
           fi
         '' + ''
           # See av1RateControl. Only Wolf's VA-API AV1 pipelines.
           toml=${cfg.stateDir}/cfg/config.toml
           if [ -f "$toml" ]; then
             sed -i -E "/encoder_pipeline = [']+vaav1(lp)?enc /s/rate-control=[a-z]+/rate-control=${cfg.av1RateControl}/" "$toml" \
-              && echo "wolf-hw-detect: VA AV1 rate-control=${cfg.av1RateControl}" \
-              || echo "wolf-hw-detect: could not update $toml"
+              && echo "wolf-config: VA AV1 rate-control=${cfg.av1RateControl}" \
+              || echo "wolf-config: could not update $toml"
           fi
         '' + ''
           # See hevcRateControl. Only Wolf's VA-API HEVC pipelines.
           toml=${cfg.stateDir}/cfg/config.toml
           if [ -f "$toml" ]; then
             sed -i -E "/encoder_pipeline = [']+vah265(lp)?enc /{s/rate-control=[a-z]+/rate-control=${cfg.hevcRateControl}/;s/cpb-size=\{[a-z_]+\}/cpb-size={${if cfg.hevcRateControl == "vbr" then "bitrate" else "vbv_buffer_size"}}/}" "$toml" \
-              && echo "wolf-hw-detect: VA HEVC rate-control=${cfg.hevcRateControl}" \
-              || echo "wolf-hw-detect: could not update $toml"
+              && echo "wolf-config: VA HEVC rate-control=${cfg.hevcRateControl}" \
+              || echo "wolf-config: could not update $toml"
           fi
         '' + ''
           # See fecPercentage. null puts Wolf's placeholder back.
           toml=${cfg.stateDir}/cfg/config.toml
           if [ -f "$toml" ]; then
             sed -i -E '/rtpmoonlightpay_video /s/fec_percentage=(\{fec_percentage\}|[0-9]+)/fec_percentage=${if cfg.fecPercentage == null then "{fec_percentage}" else toString cfg.fecPercentage}/' "$toml" \
-              && echo "wolf-hw-detect: video fec_percentage=${if cfg.fecPercentage == null then "Wolf default" else toString cfg.fecPercentage}" \
-              || echo "wolf-hw-detect: could not update $toml"
+              && echo "wolf-config: video fec_percentage=${if cfg.fecPercentage == null then "Wolf default" else toString cfg.fecPercentage}" \
+              || echo "wolf-config: could not update $toml"
           fi
         '' + ''
           true
@@ -823,21 +851,28 @@ in
       # wants, not requires: a requires would make every restart of
       # wolf-hw-detect (any change to it, on switch) restart Wolf too and end
       # running sessions. The values are read when Wolf next starts.
-      docker-wolf = {
-        wants = [ "wolf-hw-detect.service" ];
-        after = [ "wolf-hw-detect.service" ];
+      #
+      # The only definition of docker-wolf in this attrset, for every unit
+      # that has to run before it: the blocks here are joined with //, which
+      # replaces a whole unit instead of merging its lists.
+      docker-wolf = rec {
+        wants = [ "wolf-hw-detect.service" "wolf-config.service" "wolf-av1-padstrip.service" ]
+          ++ lib.optional (cfg.sharedSteamLibrary != null) "wolf-steam-library.service";
+        after = wants;
       };
     }
     // {
       # See av1StripPadding. Always present, so that turning the option off
-      # also takes the element back out of config.toml. Not restarted on
-      # switch, for the same reason as wolf-steam-library below.
+      # also takes the element back out of config.toml. Tied to Wolf's own
+      # starts like wolf-config above: turning the option on or off changes
+      # Wolf's mounts, which restarts Wolf, which runs this first.
       wolf-av1-padstrip = {
         description = "Build Wolf's AV1 padding stripper and wire it into the AV1 pipelines";
         wantedBy = [ "multi-user.target" ];
         before = [ "docker-wolf.service" ];
-        after = [ "docker.service" "wolf-hw-detect.service" ];
+        after = [ "docker.service" "wolf-hw-detect.service" "wolf-config.service" ];
         wants = [ "docker.service" ];
+        partOf = [ "docker-wolf.service" ];
         restartIfChanged = false;
         stopIfChanged = false;
         path = [ config.virtualisation.docker.package pkgs.gnused pkgs.coreutils ];
@@ -887,32 +922,25 @@ in
           true
         '';
       };
-      docker-wolf = {
-        wants = [ "wolf-av1-padstrip.service" ];
-        after = [ "wolf-av1-padstrip.service" ];
-      };
     }
     // lib.optionalAttrs (cfg.sharedSteamLibrary != null) {
-      # Not restarted on switch: it patches config.toml, which a running Wolf
-      # owns and rewrites. It runs at boot, and `systemctl restart` before a
-      # deliberate Wolf restart applies a change.
+      # Patches config.toml, so tied to Wolf's own starts like wolf-config
+      # above. A profile created while Wolf runs gets the library the next
+      # time Wolf starts.
       wolf-steam-library = {
         description = "Share one Steam library between all Wolf profiles";
         wantedBy = [ "multi-user.target" ];
         before = [ "docker-wolf.service" ];
-        after = [ "local-fs.target" ];
+        after = [ "local-fs.target" "wolf-config.service" "wolf-av1-padstrip.service" ];
+        partOf = [ "docker-wolf.service" ];
         restartIfChanged = false;
         stopIfChanged = false;
-        path = [ pkgs.gawk pkgs.gnugrep pkgs.coreutils ];
+        path = [ pkgs.gawk pkgs.gnugrep pkgs.coreutils pkgs.diffutils ];
         serviceConfig = {
           Type = "oneshot";
           RemainAfterExit = true;
           ExecStart = "${steamLibraryScript} ${lib.escapeShellArgs [ cfg.stateDir (toString cfg.sharedSteamLibrary) ]}";
         };
-      };
-      docker-wolf = {
-        wants = [ "wolf-steam-library.service" ];
-        after = [ "wolf-steam-library.service" ];
       };
     }
     // lib.optionalAttrs (cfg.advertiseTailnetRoute && config.services.tailscale.enable) {

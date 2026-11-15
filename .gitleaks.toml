@@ -1,0 +1,15 @@
+# Secret scan for scripts/check.sh (gitleaks). The default rules (tokens,
+# private keys, passwords in URLs, ...) plus the two things AGENTS.md says
+# must never be committed here and that have a recognisable shape.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "monero-address"
+description = "A Monero address (the wallet belongs in the private rig.toml)"
+regex = '''\b[48][1-9A-HJ-NP-Za-km-z]{94}(?:[1-9A-HJ-NP-Za-km-z]{11})?\b'''
+
+[[rules]]
+id = "ssh-public-key"
+description = "A real SSH public key (keys belong in the private rig.toml)"
+regex = '''\b(?:ssh-ed25519 AAAAC3NzaC1lZDI1NTE5[A-Za-z0-9+/]{40,}|ssh-rsa AAAAB3NzaC1yc2E[A-Za-z0-9+/]{200,}|ecdsa-sha2-nistp[0-9]+ AAAAE2VjZHNh[A-Za-z0-9+/]{80,}|sk-[a-z0-9-]+@openssh\.com AAAA[A-Za-z0-9+/]{60,})'''

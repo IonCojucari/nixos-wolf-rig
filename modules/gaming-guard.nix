@@ -140,6 +140,18 @@ let
 
     now() { ${pkgs.coreutils}/bin/date +%s; }
 
+    # When rig-cpu-tune last finished. It runs again on its own while a
+    # session is on -- a rebuild that changes it, rig-cpu-tune-resume after a
+    # suspend -- and puts the cap back each time; a change in this value
+    # during a session is how reconcile() below notices. Empty when there is
+    # no cap, or when systemd did not answer (then nothing is concluded).
+    tune_stamp() {
+      [ "$capped" = yes ] || return 0
+      ${pkgs.coreutils}/bin/timeout --signal=KILL 5 $systemctl show \
+        -p ExecMainExitTimestampMonotonic --value rig-cpu-tune.service 2>/dev/null || true
+    }
+    tune_seen=""
+
     apply() {
       want="$1"
       [ "$want" = "$state" ] && return 0
@@ -160,6 +172,7 @@ let
         # be shutting down for a moment yet. Nothing here depends on it being
         # gone -- the cap is a CPU setting, not a miner one.
         $uncap || true
+        tune_seen=$(tune_stamp)
       else
         echo "gaming-guard: no sessions -> re-applying the CPU cap, starting xmrig."
 
@@ -197,6 +210,12 @@ let
       if [ "$n" -gt 0 ]; then
         idle_since=""
         apply gaming
+        stamp=$(tune_stamp)
+        if [ -n "$stamp" ] && [ "$stamp" != "$tune_seen" ]; then
+          echo "gaming-guard: rig-cpu-tune ran during a session (rebuild or resume) -> lifting the CPU cap again."
+          $uncap || true
+          tune_seen=$stamp
+        fi
         return
       fi
 

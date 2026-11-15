@@ -1,0 +1,29 @@
+# Runs scripts/check.sh: the same checks as .github/workflows/check.yml and
+# as running the script by hand.
+#
+# `tags: [docker]` is the tag modules/gitlab-runner.nix tells you to give the
+# runner. On a GitLab whose runners take untagged jobs, the line can go.
+#
+# The gaming-guard VM test is not run here: it needs /dev/kvm, which a job
+# container of the Docker executor does not have. GitHub runs it; by hand:
+#   scripts/check.sh --vm
+
+stages: [check]
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH == "dev"
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+check:
+  stage: check
+  image: nixos/nix:latest
+  tags: [docker]
+  timeout: 30 minutes
+  interruptible: true
+  variables:
+    GIT_DEPTH: 0 # the secret scan reads the whole history
+  script:
+    - scripts/check.sh

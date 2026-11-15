@@ -272,6 +272,44 @@ two independent routes.
   only be reserved at boot. Measured on the running machine (`Hugetlb` in
   /proc/meminfo), not estimated.
 
+## Checks
+
+`scripts/check.sh` is what CI runs, on GitHub (`.github/workflows/check.yml`)
+and on GitLab (`.gitlab-ci.yml`), and it needs only Nix, so run it before a
+push:
+
+```sh
+scripts/check.sh         # about 20 s with a warm store
+scripts/check.sh --vm    # plus the gaming-guard VM test (KVM, minutes)
+```
+
+- no secrets in the git history or the working tree: gitleaks with its own
+  rules plus Monero addresses and SSH public keys (`.gitleaks.toml`);
+- every shell script: `bash -n` and shellcheck;
+- `modules/wolf-steam-library.sh` against a sample `config.toml`;
+- every host, the installer ISO and the install tests evaluate down to their
+  derivation (nothing is built), with the made-up settings in `ci/private`
+  standing in for the private folder;
+- without private settings a host still fails on its three guards: disks,
+  wallet, SSH key.
+
+GitHub also runs the gaming-guard VM test as a second job. GitLab does not:
+a job container has no `/dev/kvm`.
+
+### Branches and releases
+
+Work goes to `dev`; every push there runs the checks. `main` only changes
+through a pull request from `dev`, which GitHub merges only when both jobs
+are green. A tag `v*` on `main` runs `.github/workflows/release.yml`: the
+checks again, then the offline installer ISO is built and attached to a
+release of that name.
+
+```sh
+git switch dev && git commit ... && git push       # checks run
+gh pr create --base main --head dev --fill           # merge when green
+git switch main && git pull && git tag v1.1.0 && git push origin v1.1.0
+```
+
 ## Adding a machine
 
 ```

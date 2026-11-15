@@ -36,8 +36,13 @@ cat > "hosts/$name/disks.nix" <<'EOF'
 }
 EOF
 
+# Stand-in private settings, so scripts/check.sh (CI) can evaluate the host.
+if [ -d "ci/private/hosts/$from" ] && [ ! -e "ci/private/hosts/$name" ]; then
+  cp -r "ci/private/hosts/$from" "ci/private/hosts/$name"
+fi
+
 # A flake inside a git repo only sees tracked files.
-git add "hosts/$name" 2>/dev/null || true
+git add "hosts/$name" "ci/private/hosts/$name" 2>/dev/null || true
 
 cat <<EOF
 Created hosts/$name (from hosts/$from). Before installing, edit:

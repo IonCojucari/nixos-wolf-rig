@@ -24,6 +24,10 @@ In this repository use placeholders: `192.168.1.50`, `100.64.0.10`,
 If a change needs a private value, add or reuse a `rig.*` option here and
 set it in the private `rig.toml`. Commit with a no-reply author address.
 
+Before committing, run `scripts/check.sh` (the same checks CI runs; see
+"Checks" in README.md). `ci/private` holds made-up values for those checks
+only; never a real one.
+
 Rebuild on the machine with `sudo nixos-rebuild switch`. Raw `nix build` /
 `nix eval` need `--override-input private git+file:///etc/nixos-private`,
 or they stop on the placeholder assertions (that is intended).
