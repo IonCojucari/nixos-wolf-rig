@@ -270,6 +270,19 @@ hardware-specific settings:
 | `encoderQualityFix` | `true` | Wolf's VA AV1/HEVC `target-usage`: 1 on AMD, 6 on Intel |
 | `advertiseTailnetRoute` | `true` | `tailscale set --advertise-routes=<LAN IP>/32` (approve once) |
 
+Stream tuning in `rig.wolf` that is not detected but set per host (all
+documented in `modules/wolf.nix`):
+
+| Option | Default | What it does |
+|---|---|---|
+| `videoPacing.rate` | `"50mbit"` | per-client ceiling for outgoing video; every connected client gets its own class |
+| `fecPercentage` | `null` (Wolf: 20) | parity per frame; raise it for a client on a link that drops short bursts |
+| `av1PaddingFix` | `true` | stops `av1parse` doubling CBR padding, which sent AV1 out at up to twice the bitrate |
+| `av1StripPadding` | `false` | drops CBR padding from AV1 with a small GStreamer element built in the Wolf image (`modules/wolf-av1padstrip.c`) |
+| `av1RateControl`, `hevcRateControl` | `"cbr"` | VBR overshoots on game content with the AMD encoder; keep CBR |
+| `sharedSteamLibrary` | `null` | one Steam library directory shared by every Wolf profile |
+| `natTailnetPeers` | `[ ]` | tailnet addresses of routers that masquerade their clients (a TV behind a GL.iNet), so replies leave from the LAN address |
+
 Multiple GPUs: with two discrete cards (e.g. a second gaming GPU for a second
 player) detection logs a warning; pin `renderNode` to a
 `/dev/dri/by-path/pci-…-render` path. Giving each player their own GPU needs

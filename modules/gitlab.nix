@@ -17,9 +17,7 @@
 # Create <secretsDir>/root-password (any owner; gitlab-secrets-init fixes owner and
 # mode) before the first start. It is only read while the database is first seeded.
 #
-# Git over SSH is not set up. gitlab-shell needs the host's sshd to run an
-# AuthorizedKeysCommand for the gitlab user, which changes how the machine's
-# SSH daemon authenticates; clone over HTTP with a token until that is wanted.
+# Git over SSH uses gitlab-shell to resolve the public keys registered in GitLab.
 
 let
   cfg = config.rig.gitlab;
@@ -62,6 +60,10 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    services.openssh.authorizedKeysCommand =
+      "${config.services.gitlab.packages.gitlab-shell}/bin/gitlab-shell-authorized-keys-check gitlab %u %k";
+    services.openssh.authorizedKeysCommandUser = "gitlab";
+
     services.gitlab = {
       enable = true;
       host = cfg.host;

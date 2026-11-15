@@ -5,6 +5,8 @@ let
 
   detectScript = pkgs.writeShellScript "wolf-hw-detect" (builtins.readFile ./wolf-hw-detect.sh);
 
+  steamLibraryScript = pkgs.writeShellScript "wolf-steam-library" (builtins.readFile ./wolf-steam-library.sh);
+
   # Interfaces with a fixed name get their own unit; "lan" is resolved at
   # boot by wolf-hw-detect.
   namedPacingInterfaces = lib.filter (d: d != "lan") cfg.videoPacing.interfaces;
@@ -16,6 +18,10 @@ let
       videoPorts = lib.range videoRange.from videoRange.to;
     in
     {
+      # Video lands in 1:20, which only sorts it further: Wolf sends every
+      # client's video from the same socket, so the per-client split has to
+      # be made on the destination address. 1:21 is the shared fallback for
+      # clients wolf-pacing-sync has not given a class of their own yet.
       apply = pkgs.writeShellScript "wolf-pacing-apply" ''
         dev=$1
         # Start clean so a rerun does not stack duplicate filters.
@@ -23,13 +29,69 @@ let
         ${tc} qdisc add dev "$dev" root handle 1: htb default 10
         ${tc} class replace dev "$dev" parent 1: classid 1:1 htb rate 1000mbit ceil 1000mbit
         ${tc} class replace dev "$dev" parent 1:1 classid 1:10 htb rate 900mbit ceil 1000mbit prio 1
-        ${tc} class replace dev "$dev" parent 1:1 classid 1:20 htb rate ${cfg.videoPacing.rate} ceil ${cfg.videoPacing.rate} burst 15k cburst 15k prio 0
+        ${tc} class replace dev "$dev" parent 1:1 classid 1:20 htb rate ${cfg.videoPacing.rate} ceil 1000mbit prio 0
+        ${tc} class replace dev "$dev" parent 1:20 classid 1:21 htb rate ${cfg.videoPacing.rate} ceil ${cfg.videoPacing.rate} burst 15k cburst 15k prio 0
         ${tc} qdisc replace dev "$dev" parent 1:10 fq_codel
-        ${tc} qdisc replace dev "$dev" parent 1:20 pfifo limit 3000
+        ${tc} qdisc replace dev "$dev" parent 1:21 pfifo limit 3000
         ${lib.concatMapStrings (port: ''
           ${tc} filter add dev "$dev" parent 1: protocol ip prio 1 u32 match ip protocol 17 0xff match ip sport ${toString port} 0xffff flowid 1:20
         '') videoPorts}
-        echo "wolf video pacing on $dev at ${cfg.videoPacing.rate}"
+        # Without a match inside 1:20, HTB would fall back to 1:10 (unpaced).
+        ${tc} filter add dev "$dev" parent 1:20 protocol ip prio 65535 u32 match u32 0 0 flowid 1:21
+        echo "wolf video pacing on $dev at ${cfg.videoPacing.rate} per client"
+      '';
+
+      # Keeps one class per connected client under 1:20, each capped at the
+      # full rate, so two streams no longer share (and queue behind) one cap.
+      # Stateless: every round reconciles what tc has against Wolf's session
+      # list, so a re-applied root (tailscale0 recreated) is refilled within
+      # a round. The class minor and the filter prio are both derived from
+      # the client's last two octets; two clients that collide just share a
+      # class, which is no worse than before.
+      sync = pkgs.writeShellScript "wolf-pacing-sync" ''
+        set +e
+        named=(${lib.escapeShellArgs namedPacingInterfaces})
+        while true; do
+          sleep 5
+          pid=$(timeout --signal=KILL 5 docker inspect -f '{{.State.Pid}}' wolf 2>/dev/null) || continue
+          [ "''${pid:-0}" -gt 0 ] || continue
+          sessions=$(curl -sf --max-time 5 --unix-socket /proc/$pid/root/run/user/wolf/wolf.sock http://localhost/api/v1/sessions) || continue
+          ips=$(jq -r '.sessions[].client_ip | sub("^::ffff:"; "")' <<<"$sessions" | grep -E '^[0-9]+(\.[0-9]+){3}$' | sort -u) || ips=""
+
+          declare -A want=()
+          for ip in $ips; do
+            IFS=. read -r _ _ o3 o4 <<<"$ip"
+            want[$(printf %x $(( 0x1000 + ((o3 << 8) | o4) % 0xe000 )))]=$ip
+          done
+
+          devs=("''${named[@]}")
+          ${lib.optionalString (builtins.elem "lan" cfg.videoPacing.interfaces) ''
+            lan=$(. /run/wolf/hw.env 2>/dev/null; echo "''${RIG_LAN_IFACE:-}")
+            [ -n "$lan" ] && devs+=("$lan")
+          ''}
+          for dev in "''${devs[@]}"; do
+            # Not paced (yet), or still on the old single-class layout.
+            [ -n "$(${tc} class show dev "$dev" classid 1:21 2>/dev/null)" ] || continue
+            # `tc class show parent` does not filter, so match the parent
+            # here, and only ever touch minors from the per-client range.
+            have=$(${tc} class show dev "$dev" | awk '$4 == "parent" && $5 == "1:20" { sub(/^1:/, "", $3); print $3 }' | grep -E '^[1-e][0-9a-f]{3}$')
+
+            for m in "''${!want[@]}"; do
+              grep -qx "$m" <<<"$have" && continue
+              ${tc} class replace dev "$dev" parent 1:20 classid 1:$m htb rate ${cfg.videoPacing.rate} ceil ${cfg.videoPacing.rate} burst 15k cburst 15k prio 0
+              ${tc} qdisc replace dev "$dev" parent 1:$m pfifo limit 3000
+              ${tc} filter add dev "$dev" parent 1:20 protocol ip prio $((16#$m)) u32 match ip dst "''${want[$m]}"/32 flowid 1:$m \
+                && echo "$dev: ''${want[$m]} gets its own ${cfg.videoPacing.rate} (1:$m)"
+            done
+
+            for m in $have; do
+              [ -n "''${want[$m]:-}" ] && continue
+              ${tc} filter del dev "$dev" parent 1:20 prio $((16#$m)) 2>/dev/null
+              ${tc} class del dev "$dev" classid 1:$m && echo "$dev: client gone, removed 1:$m"
+            done
+          done
+          unset want
+        done
       '';
       remove = pkgs.writeShellScript "wolf-pacing-remove" ''
         ${tc} qdisc replace dev "$1" root fq_codel
@@ -118,6 +180,128 @@ in
       '';
     };
 
+    av1PaddingFix = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Make Wolf's VA-API AV1 pipelines (cfg/config.toml) hand whole
+        temporal units to the payloader (`alignment=tu`) instead of
+        `alignment=frame`, at every boot, before Wolf starts.
+
+        In CBR the AMD encoder fills each frame up to the target bitrate
+        with PADDING OBUs, and av1parse (GStreamer 1.26.7, the Wolf image)
+        emits every one of them twice when it converts to
+        `alignment=frame`. Measured 2026-11-14 on an RX 9070 XT, 1440p60,
+        44 Mbit/s target, easy content: 86.3 Mbit/s out of av1parse against
+        43.8 out of the encoder (HEVC: 43.9). A 55 Mbit/s Moonlight stream
+        then went out at ~120 Mbit/s with FEC, past videoPacing.rate and
+        the client's link: 63 % of frames lost in an IDR-request loop. With
+        `alignment=tu` the same stream runs at 0 % loss. The bitstream is
+        otherwise identical; one temporal unit is one frame here.
+      '';
+    };
+
+    av1StripPadding = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Remove the encoder's padding from Wolf's VA-API AV1 streams, with a
+        small GStreamer element (modules/wolf-av1padstrip.c) placed after
+        av1parse.
+
+        In CBR the AMD encoder pads every frame up to the target bitrate, so
+        a static menu costs as much data as a firefight. The padding is its
+        own OBU type that decoders skip; dropping it leaves the picture
+        bit-identical (checked 2026-11-14 by decoded-frame hash) and cannot
+        raise the bitrate, unlike av1RateControl = "vbr". Measured on an
+        RX 9070 XT, 1440p60, 44 Mbit/s target: easy content 1.1 Mbit/s
+        instead of 43.8, hard content unchanged.
+
+        The element is compiled inside the Wolf image, so it links against
+        that image's GStreamer, by wolf-av1-padstrip before Wolf starts, and
+        again whenever the image or the source changes. It lands in
+        <stateDir>/gst-plugins, mounted at av1StripPaddingMount. If the
+        build fails, or the image does not find the element there, the
+        pipeline is left without it, so AV1 keeps working, padded.
+      '';
+    };
+
+    av1StripPaddingMount = lib.mkOption {
+      type = lib.types.str;
+      default = "/usr/local/lib64/gstreamer-1.0/wolf-rig";
+      description = ''
+        Where <stateDir>/gst-plugins is mounted in the Wolf container: a
+        subdirectory of the image's GStreamer plugin directory. Change it
+        if a future Wolf image moves that directory.
+      '';
+    };
+
+    av1RateControl = lib.mkOption {
+      type = lib.types.enum [ "cbr" "vbr" ];
+      default = "cbr";
+      description = ''
+        Rate control of Wolf's VA-API AV1 pipelines (cfg/config.toml),
+        written at every boot, before Wolf starts. "cbr" is Wolf's default.
+
+        In CBR the AMD encoder pads every frame up to the target bitrate,
+        so a static menu costs as much data as a firefight. VBR sends only
+        what the picture needs, with the Moonlight bitrate as the ceiling.
+        Measured 2026-11-14 on an RX 9070 XT, 1440p60, 44 Mbit/s target:
+        easy content 1.1 Mbit/s against 43.8 in CBR; medium 40.8 against
+        38.2; hard 28.2 against 40.8. VBR never went over the target in any
+        one-second window, and its largest frame was no larger than CBR's.
+        It spends less than CBR on the hardest content, so quality there
+        may be lower (bitrate was measured, picture quality was not). QVBR
+        was tried and overshot the ceiling.
+      '';
+    };
+
+    hevcRateControl = lib.mkOption {
+      type = lib.types.enum [ "cbr" "vbr" ];
+      default = "cbr";
+      description = ''
+        Rate control of Wolf's VA-API HEVC pipelines (cfg/config.toml),
+        written at every boot, before Wolf starts. "cbr" is Wolf's default.
+
+        "vbr" sends only what the picture needs, with the Moonlight bitrate
+        as the peak, instead of padding every frame up to it. It also sets
+        the encoder's buffer (cpb-size) to one second of that bitrate,
+        the tightest value GStreamer keeps without resetting it to two
+        seconds, to narrow the window in which the encoder may run above
+        the peak. Measured 2026-11-14 on an RX 9070 XT, 1440p60, 44 Mbit/s:
+        easy content 0.8 Mbit/s against 43.9 in CBR, hard content 15.5
+        against 41.2. Those are test patterns: the same test looked just as
+        safe for AV1, which then ran 40 % over its ceiling in a real game
+        (see av1RateControl). Watch the wire rate in a game before trusting
+        it.
+      '';
+    };
+
+    fecPercentage = lib.mkOption {
+      type = lib.types.nullOr (lib.types.ints.between 1 100);
+      default = null;
+      example = 40;
+      description = ''
+        Parity packets Wolf adds to every video frame, as a percentage of the
+        frame's data packets. null keeps Wolf's own value (20). Written into
+        the video sink in cfg/config.toml at every boot, before Wolf starts;
+        Moonlight reads the percentage from each packet, so no client setting
+        changes.
+
+        Raise it for clients behind a link that drops short bursts. Wolf has
+        no reference frame invalidation, so one unrecoverable frame costs a
+        whole IDR (and a visible hitch). Measured 2026-11-14 towards a client
+        whose uplink loses 2-3 ms bursts ~10 times a minute: with video paced
+        at 70mbit a burst is 10-20 packets out of a ~65 packet frame, more
+        than 20 % parity can rebuild, less than 40 % can.
+
+        Costs bandwidth (Moonlight budgets for 20 %: 40 % makes a 40 Mbit/s
+        stream ~47), and lowers the largest frame that still gets FEC at all,
+        3 x 255 / (1 + fec) packets: 636 at 20 %, 546 at 40 %. Keep
+        videoPacing.rate above the resulting total.
+      '';
+    };
+
     ports = {
       tcp = lib.mkOption {
         type = lib.types.listOf lib.types.port;
@@ -187,7 +371,7 @@ in
 
           Without pacing, every frame leaves at line rate (1 Gbit/s) as one
           burst. That is fine on the LAN, but a stream that goes out over the
-          internet (here: through the GL-BE6500's tailscale subnet route) hits
+          internet (for example through a router's tailscale subnet route) hits
           a much slower link somewhere, and a burst that overflows that
           link's buffer loses a run of packets at once. The real damage is
           done by keyframes: Wolf has no reference frame invalidation, so
@@ -207,12 +391,40 @@ in
         type = lib.types.str;
         default = "50mbit";
         description = ''
-          Ceiling for Wolf's outgoing video, as a tc rate. Must stay well
-          above the Moonlight bitrate, or every frame queues behind the
-          last; it only needs to be low enough to fit through the slowest
-          link on the path.
+          Ceiling for Wolf's outgoing video to each client, as a tc rate
+          (wolf-pacing-sync gives every connected client its own class).
+          Must stay well above the Moonlight bitrate, or every frame queues
+          behind the last; it only needs to be low enough to fit through the
+          slowest link on the path.
         '';
       };
+    };
+
+    sharedSteamLibrary = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      example = "/data/steam-library";
+      description = ''
+        Host directory used as one Steam library by every profile's Steam
+        container (mounted at /home/retro/SteamLibrary), so a game is
+        installed once instead of once per user.
+
+        Wolf gives each profile its own app state, hence its own Steam and its
+        own library. With this set, the directory is created (uid 1000, the
+        container's `retro` user) and, before every Wolf start,
+        wolf-steam-library mounts it into each app named WolfSteam in
+        cfg/config.toml and registers it in the libraryfolders.vdf of every
+        existing profile. A profile created later needs the library added once
+        in Steam > Settings > Storage (path /home/retro/SteamLibrary).
+
+        Each Steam account must still own a game to run it (or get it through
+        Family Sharing), and two users must not install or update at the same
+        time. Proton prefixes (steamapps/compatdata) are shared too, so users
+        share the saves of games that keep them there.
+
+        Put it on the same filesystem as stateDir if existing installs are to
+        be moved in with a rename instead of a copy.
+      '';
     };
 
     stateDir = lib.mkOption {
@@ -266,6 +478,26 @@ in
         one-time approval in the Tailscale admin console (Machines -> this
         host -> Edit route settings). Replaces any other routes this host
         advertises.
+      '';
+    };
+
+    natTailnetPeers = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "100.64.0.10" ];
+      description = ''
+        Tailnet addresses of routers that masquerade their LAN clients onto
+        the tailnet (e.g. a GL.iNet router with Tailscale "masq" on, in front
+        of a TV running Moonlight).
+
+        Such a client reaches this host at its LAN address through
+        advertiseTailnetRoute, and the router's NAT only lets replies back in
+        that come from that same address. Wolf's UDP sockets are unbound, so
+        the kernel would source replies from tailscale0's own 100.x address
+        and the router drops them: pairing and RTSP (TCP) work, the stream
+        never starts. For each peer listed here a route with the LAN address
+        as preferred source is installed in table 51, ahead of Tailscale's
+        table 52. Only traffic to those peers is affected.
       '';
     };
 
@@ -422,6 +654,13 @@ in
         # queries with the fake-udev helper it drops in /etc/wolf, but it
         # still needs the host's real udev socket to see hotplugs.
         "/run/udev:/run/udev:rw"
+      ] ++ lib.optionals cfg.av1StripPadding [
+        # See av1StripPadding. A subdirectory of the image's own plugin
+        # directory, which GStreamer scans recursively. Not the per-user
+        # plugin directory: Wolf runs with HOME=/root while `docker exec`
+        # gets HOME=/home/retro, so a plugin there shows up in gst-inspect
+        # and is still missing in Wolf.
+        "${cfg.stateDir}/gst-plugins:${cfg.av1StripPaddingMount}:ro"
       ];
 
       extraOptions = [
@@ -455,6 +694,11 @@ in
     systemd.tmpfiles.rules = [
       "d ${cfg.stateDir} 0755 root root -"
       "d ${cfg.stateDir}/cfg 0700 root root -"
+    ] ++ lib.optionals (cfg.sharedSteamLibrary != null) [
+      "d ${cfg.sharedSteamLibrary} 0777 1000 1000 -"
+      "d ${cfg.sharedSteamLibrary}/steamapps 0777 1000 1000 -"
+      "d ${cfg.sharedSteamLibrary}/steamapps/common 0777 1000 1000 -"
+      "d ${cfg.sharedSteamLibrary}/steamapps/compatdata 0777 1000 1000 -"
     ];
 
     # GPU. The host itself never renders anything -- there is no desktop here,
@@ -485,6 +729,19 @@ in
           ExecStop = "${pacing.remove} ${dev}";
         };
       }) namedPacingInterfaces)
+    // lib.optionalAttrs (cfg.videoPacing.interfaces != [ ]) {
+      wolf-pacing-sync = {
+        description = "Give every connected Wolf client its own video pacing class";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "docker-wolf.service" ];
+        path = [ config.virtualisation.docker.package pkgs.curl pkgs.jq pkgs.coreutils pkgs.gnugrep pkgs.gawk ];
+        serviceConfig = {
+          ExecStart = "${pacing.sync}";
+          Restart = "always";
+          RestartSec = 10;
+        };
+      };
+    }
     // {
       wolf-hw-detect = {
         description = "Resolve Wolf's GPU, network and CPU settings for this machine";
@@ -525,6 +782,39 @@ in
               && echo "wolf-hw-detect: VA AV1/HEVC target-usage=$tu for encoder vendor $RIG_ENCODER_VENDOR" \
               || echo "wolf-hw-detect: could not update $toml"
           fi
+        '' + lib.optionalString cfg.av1PaddingFix ''
+          # See av1PaddingFix. Only Wolf's VA-API AV1 pipelines; the caps
+          # line is two lines below the encoder line.
+          toml=${cfg.stateDir}/cfg/config.toml
+          if [ -f "$toml" ]; then
+            sed -i -E "/encoder_pipeline = [']+vaav1(lp)?enc /,/profile=main/s/alignment=frame/alignment=tu/" "$toml" \
+              && echo "wolf-hw-detect: VA AV1 pipelines use alignment=tu" \
+              || echo "wolf-hw-detect: could not update $toml"
+          fi
+        '' + ''
+          # See av1RateControl. Only Wolf's VA-API AV1 pipelines.
+          toml=${cfg.stateDir}/cfg/config.toml
+          if [ -f "$toml" ]; then
+            sed -i -E "/encoder_pipeline = [']+vaav1(lp)?enc /s/rate-control=[a-z]+/rate-control=${cfg.av1RateControl}/" "$toml" \
+              && echo "wolf-hw-detect: VA AV1 rate-control=${cfg.av1RateControl}" \
+              || echo "wolf-hw-detect: could not update $toml"
+          fi
+        '' + ''
+          # See hevcRateControl. Only Wolf's VA-API HEVC pipelines.
+          toml=${cfg.stateDir}/cfg/config.toml
+          if [ -f "$toml" ]; then
+            sed -i -E "/encoder_pipeline = [']+vah265(lp)?enc /{s/rate-control=[a-z]+/rate-control=${cfg.hevcRateControl}/;s/cpb-size=\{[a-z_]+\}/cpb-size={${if cfg.hevcRateControl == "vbr" then "bitrate" else "vbv_buffer_size"}}/}" "$toml" \
+              && echo "wolf-hw-detect: VA HEVC rate-control=${cfg.hevcRateControl}" \
+              || echo "wolf-hw-detect: could not update $toml"
+          fi
+        '' + ''
+          # See fecPercentage. null puts Wolf's placeholder back.
+          toml=${cfg.stateDir}/cfg/config.toml
+          if [ -f "$toml" ]; then
+            sed -i -E '/rtpmoonlightpay_video /s/fec_percentage=(\{fec_percentage\}|[0-9]+)/fec_percentage=${if cfg.fecPercentage == null then "{fec_percentage}" else toString cfg.fecPercentage}/' "$toml" \
+              && echo "wolf-hw-detect: video fec_percentage=${if cfg.fecPercentage == null then "Wolf default" else toString cfg.fecPercentage}" \
+              || echo "wolf-hw-detect: could not update $toml"
+          fi
         '' + ''
           true
         '';
@@ -536,6 +826,93 @@ in
       docker-wolf = {
         wants = [ "wolf-hw-detect.service" ];
         after = [ "wolf-hw-detect.service" ];
+      };
+    }
+    // {
+      # See av1StripPadding. Always present, so that turning the option off
+      # also takes the element back out of config.toml. Not restarted on
+      # switch, for the same reason as wolf-steam-library below.
+      wolf-av1-padstrip = {
+        description = "Build Wolf's AV1 padding stripper and wire it into the AV1 pipelines";
+        wantedBy = [ "multi-user.target" ];
+        before = [ "docker-wolf.service" ];
+        after = [ "docker.service" "wolf-hw-detect.service" ];
+        wants = [ "docker.service" ];
+        restartIfChanged = false;
+        stopIfChanged = false;
+        path = [ config.virtualisation.docker.package pkgs.gnused pkgs.coreutils ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+        };
+        script = ''
+          dir=${cfg.stateDir}/gst-plugins
+          so=$dir/libgstav1padstrip.so
+          toml=${cfg.stateDir}/cfg/config.toml
+          mkdir -p "$dir"
+        '' + lib.optionalString cfg.av1StripPadding ''
+          # Rebuild when the image or the source changes. No image yet (first
+          # boot, before Wolf's own pull): skip, the next start builds it.
+          id=$(docker image inspect -f '{{.Id}}' ${lib.escapeShellArg cfg.image} 2>/dev/null || true)
+          want="$id ${builtins.hashFile "sha256" ./wolf-av1padstrip.c}"
+          if [ -n "$id" ] && { [ ! -f "$so" ] || [ "$(cat "$dir/.stamp" 2>/dev/null)" != "$want" ]; }; then
+            if docker run --rm --network=none --entrypoint sh \
+                 -v ${./wolf-av1padstrip.c}:/src/gstav1padstrip.c:ro -v "$dir":/out \
+                 ${lib.escapeShellArg cfg.image} -c \
+                 'gcc -shared -fPIC -O2 /src/gstav1padstrip.c -o /out/new.so $(pkg-config --cflags --libs gstreamer-base-1.0) && mv /out/new.so /out/libgstav1padstrip.so' \
+               && docker run --rm --network=none --entrypoint sh \
+                 -v "$dir":${cfg.av1StripPaddingMount}:ro \
+                 ${lib.escapeShellArg cfg.image} -c \
+                 'GST_REGISTRY=/tmp/reg.bin gst-inspect-1.0 av1padstrip >/dev/null 2>&1'
+            then
+              echo "$want" > "$dir/.stamp"
+              echo "wolf-av1-padstrip: built $so"
+            else
+              rm -f "$so" "$dir/new.so" "$dir/.stamp"
+              echo "wolf-av1-padstrip: build failed or the image does not load it, AV1 stays padded"
+            fi
+          fi
+        '' + lib.optionalString (!cfg.av1StripPadding) ''
+          rm -f "$so" "$dir/.stamp"
+        '' + ''
+          # Take the element out, then put it back after av1parse in the
+          # VA-API AV1 pipelines only if there is a plugin to load.
+          if [ -f "$toml" ]; then
+            sed -i '/^av1padstrip !$/d' "$toml"
+            if [ -f "$so" ]; then
+              sed -i -E "/encoder_pipeline = [']+vaav1(lp)?enc /,/profile=main/s/^av1parse !\$/av1parse !\nav1padstrip !/" "$toml" \
+                && echo "wolf-av1-padstrip: VA AV1 pipelines strip padding"
+            fi
+          fi
+          true
+        '';
+      };
+      docker-wolf = {
+        wants = [ "wolf-av1-padstrip.service" ];
+        after = [ "wolf-av1-padstrip.service" ];
+      };
+    }
+    // lib.optionalAttrs (cfg.sharedSteamLibrary != null) {
+      # Not restarted on switch: it patches config.toml, which a running Wolf
+      # owns and rewrites. It runs at boot, and `systemctl restart` before a
+      # deliberate Wolf restart applies a change.
+      wolf-steam-library = {
+        description = "Share one Steam library between all Wolf profiles";
+        wantedBy = [ "multi-user.target" ];
+        before = [ "docker-wolf.service" ];
+        after = [ "local-fs.target" ];
+        restartIfChanged = false;
+        stopIfChanged = false;
+        path = [ pkgs.gawk pkgs.gnugrep pkgs.coreutils ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = "${steamLibraryScript} ${lib.escapeShellArgs [ cfg.stateDir (toString cfg.sharedSteamLibrary) ]}";
+        };
+      };
+      docker-wolf = {
+        wants = [ "wolf-steam-library.service" ];
+        after = [ "wolf-steam-library.service" ];
       };
     }
     // lib.optionalAttrs (cfg.advertiseTailnetRoute && config.services.tailscale.enable) {
@@ -557,6 +934,41 @@ in
           [ -n "''${RIG_LAN_IP:-}" ] || { echo "no LAN address resolved"; exit 1; }
           tailscale set --advertise-routes="$RIG_LAN_IP/32"
           echo "advertising $RIG_LAN_IP/32"
+        '';
+      };
+    }
+    // lib.optionalAttrs (cfg.natTailnetPeers != [ ] && config.services.tailscale.enable) {
+      wolf-tailnet-nat-peers = {
+        description = "Source replies to masquerading tailnet routers from the LAN address";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "tailscaled.service" "wolf-hw-detect.service" ];
+        requires = [ "wolf-hw-detect.service" ];
+        # tailscale0 is recreated when tailscaled restarts, which drops the
+        # routes below; partOf reruns this unit with it.
+        partOf = [ "tailscaled.service" ];
+        wants = [ "tailscaled.service" ];
+        path = [ pkgs.iproute2 ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          Restart = "on-failure";
+          RestartSec = 10;
+        };
+        script = ''
+          . /run/wolf/hw.env
+          [ -n "''${RIG_LAN_IP:-}" ] || { echo "no LAN address resolved"; exit 1; }
+          for peer in ${lib.escapeShellArgs cfg.natTailnetPeers}; do
+            ip route replace "$peer/32" dev tailscale0 src "$RIG_LAN_IP" table 51
+            ip rule del to "$peer/32" lookup 51 priority 5200 2>/dev/null || true
+            ip rule add to "$peer/32" lookup 51 priority 5200
+            echo "replies to $peer sourced from $RIG_LAN_IP"
+          done
+        '';
+        preStop = ''
+          for peer in ${lib.escapeShellArgs cfg.natTailnetPeers}; do
+            ip rule del to "$peer/32" lookup 51 priority 5200 2>/dev/null || true
+            ip route del "$peer/32" table 51 2>/dev/null || true
+          done
         '';
       };
     }

@@ -37,11 +37,35 @@
     # straight here. Approved once in the Tailscale admin console.
     advertiseTailnetRoute = false;  # true once the host is on your tailnet
 
+    # A router that masquerades its LAN clients onto the tailnet (e.g. a
+    # GL.iNet with Tailscale "masq" on, in front of a TV running Moonlight)
+    # goes here by its tailnet address; without it those streams never start.
+    # See natTailnetPeers in modules/wolf.nix.
+    # natTailnetPeers = [ "100.64.0.10" ];
+
     # Without this, remote (tailnet) streams get stuck in an IDR-request loop
     # and freeze; see videoPacing in modules/wolf.nix. tailscale0 carries the
     # direct tailnet streams (the /32 above).
     videoPacing.interfaces = [ "lan" "tailscale0" ];
     videoPacing.rate = "60mbit";
+
+    # Parity per frame (Wolf ships 20). A remote client whose uplink drops
+    # 2-3 ms bursts loses more of a frame than 20 % can rebuild, and each
+    # such frame costs an IDR. 35 was picked by feel on 2026-11-14 after
+    # trying 20, 25, 30, 40 and 60 in real games. null leaves Wolf at 20.
+    fecPercentage = 35;
+
+    # "vbr" was tried for both codecs on 2026-11-14 to stop CBR padding. On
+    # game content the AMD encoder overshot badly (67-105 Mbit/s for a
+    # 55 Mbit/s AV1 stream, up to 108 for 62.5 Mbit/s HEVC) and looped on
+    # IDRs. Keep "cbr".
+    av1RateControl = "cbr";
+    hevcRateControl = "cbr";
+
+    # What VBR was meant to do, done safely: CBR stays, its padding is
+    # dropped before the stream leaves. Off until measured in real games; see
+    # av1StripPadding in modules/wolf.nix.
+    av1StripPadding = false;
 
     # CPU-heavy games made the stream lag. The last core (and its SMT
     # sibling) is kept free of games for Wolf and tailscaled, which also get
@@ -55,6 +79,11 @@
     # A lobby nobody has been connected to for 5 min is stopped, so the
     # gaming guard can hand the box back to mining (after its own 60 s grace).
     idleStopMinutes = 5;
+
+    # One Steam library for every Wolf profile: install a game once, every
+    # user's Steam sees it. On /data, next to the profile data, so moving an
+    # existing install in is a rename.
+    sharedSteamLibrary = "/data/steam-library";
   };
 
   # ---------------------------------------------------------------------------

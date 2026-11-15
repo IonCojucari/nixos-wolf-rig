@@ -179,7 +179,8 @@
 
   environment.systemPackages = with pkgs; [
     htop
-    btop
+    # rocmSupport: without librocm_smi64 btop has no way to read an AMD GPU.
+    (btop.override { rocmSupport = true; })
     tmux
     git
     pciutils
