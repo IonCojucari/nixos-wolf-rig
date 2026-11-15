@@ -1,366 +1,276 @@
 # nixos-wolf-rig
 
-A NixOS config for one machine that does two jobs: a [Wolf](https://games-on-whales.github.io/wolf/)
-game-streaming host for Moonlight clients, and a Monero miner that uses the
-cores nobody is streaming on.
+A NixOS configuration for one machine with two jobs: it streams games to
+Moonlight clients with [Wolf](https://games-on-whales.github.io/wolf/), and
+it mines Monero while nobody is playing.
 
-Derived from [nixos-xmrig-flake](https://github.com/IonCojucari/nixos-xmrig-flake).
-The mining, power and MQTT modules are vendored from it unchanged;
-what is new here is `modules/wolf.nix`, `modules/gaming-guard.nix`, and a
+Derived from [nixos-xmrig-flake](https://github.com/IonCojucari/nixos-xmrig-flake):
+the mining, power and MQTT modules come from there. New here are Wolf
+(`modules/wolf.nix`), the gaming guard (`modules/gaming-guard.nix`) and a
 two-disk layout.
 
-## The machine
+- [How it works](#how-it-works)
+- [Install](#install)
+- [Private settings](#private-settings)
+- [After installing](#after-installing)
+- [Users and pairing](#users-and-pairing)
+- [Settings](#settings)
+- [Adding a machine](#adding-a-machine)
+- [Development](#development)
+- [Notes](#notes)
+
+## How it works
+
+Mining and streaming cannot share this CPU: RandomX keeps every core at 100 %,
+empties the L3 cache that makes a 9800X3D good at games, and runs under a
+frequency cap (55 %, for hashes per watt) that stays in place even when the
+miner is stopped.
+
+So `rig-gaming-guard` switches between the two:
+
+| When | What happens |
+|---|---|
+| A Wolf session container appears (`WolfSteam_*`, `Wolf-UI_*`) | At once: XMRig is stopped and the CPU cap is lifted |
+| The last one has been gone for `graceSeconds` (60) | The cap is put back, then XMRig starts |
+
+The wait on the way out is there because quitting to the Wolf UI, switching
+apps or a Wi-Fi drop all look like "nobody is streaming", and restarting the
+miner into each of those gaps costs several seconds of every core.
+
+The reasoning and the measurements are in the comments of
+`modules/gaming-guard.nix` and `hosts/wolf-rig/rig.nix`.
+
+The reference machine:
 
 | | |
 |---|---|
 | CPU | Ryzen 7 9800X3D (8C/16T) |
-| GPU | Radeon RX 9070 XT (Navi 48) at `03:00.0`, plus the CPU's iGPU at `0e:00.0` |
+| GPU | Radeon RX 9070 XT, plus the CPU's iGPU |
 | RAM | 30 GiB |
-| System disk | Sabrent 476 GB NVMe — ESP, swap, root |
-| Data disk | Crucial P3 931 GB NVMe — `/data`, bind-mounted to `/var/lib/docker` and `/etc/wolf` |
-| Network | `enp9s0`, `r8169`, `<the rig's MAC>`, DHCP |
+| System disk | 476 GB NVMe: ESP, swap, root |
+| Data disk | 931 GB NVMe: `/data` (Docker, Wolf, games) |
 
-## How mining and streaming coexist
+## Install
 
-Mining is not merely "also busy" — it attacks the three things a stream needs
-most, and only the first is obvious:
+**Both ways erase the disks you name, and the machine has no second OS to
+fall back on.**
 
-1. **All cores saturated.** RandomX runs one thread per core at 100%, and the
-   vendored `modules/mining.nix` sets `yield = false` (correct for a headless
-   rig, hostile here).
-2. **The CPU is clock-capped.** `rig-cpu-tune` pins the frequency ceiling to
-   `rig.mining.efficiency.maxFreqPercent` for hashes-per-watt. **The cap
-   outlives XMRig** — stopping the miner does not restore it.
-3. **The L3 cache is evicted.** This is the 9800X3D-specific one, and the
-   reason renicing XMRig is not a fix. RandomX deliberately thrashes a 2 MiB
-   scratchpad per thread; sixteen of those flush the 96 MiB of 3D V-Cache that
-   is the whole reason this CPU games well. Scheduling priority cannot help,
-   because the damage is done by memory traffic from a thread that *did* get
-   scheduled.
+Requirements: x86-64, UEFI, an AMD or Intel GPU, 16 GB RAM or more.
 
-So `rig-gaming-guard` stops mining outright rather than throttling it, restores
-the clocks on the way in, and re-applies the cap on the way out — in that order
-relative to the miner, so XMRig never gets a window at full clock. The cap
-itself is `rig.mining.efficiency`, set to 55% of this CPU's frequency range in
-`hosts/wolf-rig/rig.nix`: measured at the wall, 9517 H/s at 101.9 W against
-11927 H/s at 146.0 W flat out, so 20% less hashrate for 30% less power. It detects sessions from Wolf's own
-containers — Wolf starts one per connected client (`WolfSteam_*`, `Wolf-UI_*`)
-and stops it on disconnect, so "is anyone streaming" is read from the same fact
-Wolf is acting on.
+### From the USB stick (easiest)
 
-The behaviour is asymmetric on purpose:
+1. Download the ISO from the [releases page](../../releases) and write it to
+   a USB stick (Ventoy, Balena Etcher or `dd`).
+2. Boot the machine from it and run `sudo rig-install`.
+3. Answer the questions: system disk, optional data disk, hostname, an SSH
+   key and/or a console password for `admin`, and optionally a Monero
+   address.
+4. Type `ERASE`. It partitions, installs and writes `/etc/nixos`.
 
-- **Session starts → act immediately.** A client that connects and games for
-  even a few seconds on a capped CPU with XMRig resident forms its impression
-  of the stream right there.
-- **Session ends → wait `graceSeconds` (default 60).** Quitting to the Wolf UI,
-  switching apps, or a Wi-Fi blip all look identical to "nobody is streaming".
-  Restarting XMRig into each gap costs a full RandomX dataset re-init — several
-  seconds of every core — right when the client is most likely to reconnect.
-
-```
-              ┌─ Wolf* container appears ──────────────► stop xmrig
-  mining ────►│                                          unleash CPU  ──► gaming
-              └─ …none for graceSeconds ◄── re-tune CPU, start xmrig ◄──┘
-```
-
-## Offline USB installer
-
-The easiest way in: download the ISO from the
-[releases page](../../releases), write it to a USB stick (Ventoy, Balena
-Etcher, or `dd`), boot the target PC from it and run
-
-```
-sudo rig-install
-```
-
-It lists the disks (never the stick you booted from), asks which one gets
-the system and whether a second one should hold Docker, Wolf and the games,
-then a hostname, an SSH key and/or console password for `admin`, and your
-Monero address (optional: without one, mining stays off until you put one in
-`/etc/xmrig/wallet`). After you type `ERASE` it partitions, installs and
-writes `/etc/nixos` for later rebuilds. **Nothing is downloaded during the
-install** -- the whole system is on the stick. After the first boot, with
-internet: Wolf pulls its container, pair Moonlight at `http://<ip>:47989`,
-and `sudo nixos-rebuild switch --flake /etc/nixos#<hostname>` adds the parts
+Nothing is downloaded during the install. After the first boot, with
+internet, `sudo nixos-rebuild switch --flake /etc/nixos#<hostname>` adds what
 the stick leaves out (Whisper).
-
-Requirements: x86-64, UEFI, an AMD or Intel GPU, 16 GB RAM or more (mining
-reserves ~5.5 GiB of hugepages at boot).
 
 Build the ISO yourself with `nix build .#installerIso`.
 
-## Private settings
+### Over SSH, onto a machine that is already running Linux
 
-Nothing personal has to be written into this repository. The admin login and
-SSH keys, the wallet, disk IDs, addresses and any module of your own go in a
-folder outside it, `/etc/nixos-private`, which is plugged in as the flake
-input `private`:
-
-```
-cp -r private.example /etc/nixos-private     # then edit hosts/<host>/rig.toml
-sudo rig-rebuild switch
-```
-
-Plain `nixos-rebuild switch` works too: on an installed rig it is wrapped to
-add the same input whenever it builds `/etc/nixos`.
-
-`rig-rebuild` is `nixos-rebuild --flake /etc/nixos#<hostname>` with
-`--override-input private git+file:///etc/nixos-private` added (`path:` if
-the folder is not a git repository). For any other `nix` command on the real
-configuration, pass the same `--override-input`. Without it the flake uses
-the empty template in `private.example/`, and the build stops on the
-placeholder assertions.
-
-In `/etc/nixos-private/hosts/<host>/`:
-
-- `rig.toml` — everything under `[rig]` is laid over the `rig.*` options of
-  `hosts/<host>` and wins, so any of them can be set there
-  (`[rig.admin]`, `[rig.disk]`, `[rig.mining.pool]`, `[rig.wolf]`, ...).
-- `*.nix` — each file is loaded as one more NixOS module for that host.
-
-It is not a place for passwords or tokens: the folder is copied to
-`/nix/store`, which every local user can read. Those stay in the files
-`scripts/mk-secrets.sh` writes. If the folder is a git repository, new files
-must be `git add`ed before a rebuild sees them.
-
-## Before you install
-
-**Every disk named in `hosts/<host>/disks.nix` is erased, and there is no
-fallback OS.** Get these right first.
-
-1. **New machine?** `scripts/new-host.sh <name>` copies `hosts/wolf-rig` to
-   `hosts/<name>` (see [Adding a machine](#adding-a-machine)).
-2. **Set your Monero address**: `rig.mining.pool.wallet`, in `hosts/<host>/rig.nix`
-   or in the private `rig.toml` (see [Private settings](#private-settings)). The build fails
-   while it is the placeholder.
-3. **Confirm the disk `by-id` paths** in `hosts/<host>/disks.nix` (or `[rig.disk]`
-   in the private `rig.toml`):
+1. Put your settings in the private folder: admin SSH keys, disk IDs,
+   wallet. See [Private settings](#private-settings). The build refuses to
+   go on while any of the three is missing.
+2. Get the disk IDs from the target, and check them twice. A mix-up between
+   two drives does not fail; it installs the system on the wrong one.
    ```
    ssh <host> 'ls -l /dev/disk/by-id/ | grep -v part'
    ```
-   With two drives, a mismatch does not fail — it silently installs the
-   system onto the game drive. `new-host.sh` leaves `CHANGEME` placeholders
-   that the build refuses.
-4. **Check the SSH keys** in `rig.admin.sshKeys` (private `rig.toml`). sshd is key-only with
-   root login disabled and there is no desktop, so a missing key means a machine
-   you cannot reach. An assertion enforces that the list is non-empty; it cannot
-   check that the keys are *yours*.
-5. **Dry-run the whole install** — partitions the disks with the real script,
-   installs, boots the result:
+3. Create the secrets (XMRig API token, MQTT password, console password):
+   ```
+   scripts/mk-secrets.sh <host>
+   ```
+4. Try the whole install in a VM first:
    ```
    nix build .#installTest-<host>
    ```
+5. Install:
+   ```
+   nix run github:nix-community/nixos-anywhere -- \
+     --flake .#<host> \
+     --target-host <user>@<ip> \
+     --extra-files ./secrets/<host>
+   ```
 
-## Installing
+The SSH session drops while the target reboots into the installer and comes
+back on the same address. Reserve that address for the machine on your router
+first.
 
-```
-nix run github:nix-community/nixos-anywhere -- \
-  --flake .#<host> \
-  --target-host <user>@<ip> \
-  --extra-files ./secrets/<host>
-```
+Later changes, on the machine: `sudo nixos-rebuild switch`.
 
-Build `./secrets/<host>` with `scripts/mk-secrets.sh <host>` — it writes the XMRig API token,
-the MQTT password and the console password hash. These are
-shipped out-of-store because everything in `/nix/store` is world-readable.
+## Private settings
 
-nixos-anywhere kexecs the running CachyOS into an in-RAM installer, so no boot
-media is needed. **The SSH session drops at that point** and comes back when the
-installer has booted — same MAC, same DHCP lease, same IP. Set a DHCP
-reservation for `<the rig's MAC>` on the router first; it costs nothing and
-removes the one variable that would otherwise strand the machine.
-
-Rebuilds afterwards:
+Nothing personal has to be written into this repository. It goes in a folder
+next to it, `/etc/nixos-private`:
 
 ```
-nixos-rebuild switch --flake .#wolf-rig --target-host admin@<rig-ip> --use-remote-sudo
+cp -r private.example /etc/nixos-private     # then edit hosts/<host>/rig.toml
+sudo nixos-rebuild switch
 ```
+
+In `/etc/nixos-private/hosts/<host>/`:
+
+- `rig.toml`: values for any `rig.*` option (`[rig.admin]`, `[rig.disk]`,
+  `[rig.mining.pool]`, `[rig.wolf]`, ...). They win over the host's files.
+- `*.nix`: extra NixOS modules for that host.
+
+Good to know:
+
+- No passwords or tokens there. The folder is copied to `/nix/store`, which
+  every local user can read. Those go in the files `scripts/mk-secrets.sh`
+  writes.
+- If the folder is a git repository, `git add` new files before a rebuild.
+- On an installed rig, `nixos-rebuild` plugs the folder in by itself. Any
+  other `nix` command needs
+  `--override-input private git+file:///etc/nixos-private`; without it the
+  build stops on the placeholder checks.
 
 ## After installing
 
-**Check what the machine resolved before pairing anything.** GPUs, encoder,
-LAN interface/address and the game CPU set are detected at every boot:
+1. Check what was detected (GPU, encoder, network, game CPUs). The render
+   node must be the discrete card.
+   ```
+   journalctl -u wolf-hw-detect -b
+   ```
+2. Join the tailnet with `sudo tailscale up` and approve the machine's /32
+   route in the admin console. With Tailnet Lock, also sign the node:
+   `tailscale lock sign`.
+3. Pair a client: add the host in Moonlight, then enter the PIN it shows at
+   `http://<rig-ip>:47989`.
+4. Watch the guard switch between mining and gaming:
+   ```
+   journalctl -u rig-gaming-guard -f
+   ```
 
-```
-ssh admin@<ip> 'journalctl -u wolf-hw-detect -b'
-```
+**Back up `/etc/wolf`.** Losing `cfg/cert.pem` un-pairs every client; losing
+`cfg/config.toml` loses the profiles and the app list.
 
-The render node must be the discrete card (on wolf-rig:
-`pci-0000:03:00.0-render`, the RX 9070 XT). A box with two discrete GPUs logs a
-warning; pin `rig.wolf.renderNode` there.
+## Users and pairing
 
-Then join the tailnet (`sudo tailscale up`; this tailnet uses Tailnet Lock, so
-sign the new node from a trusted device with `tailscale lock sign`), approve its
-/32 route in the admin console, and check the guard is arbitrating:
+There is one Linux account, `admin` (key-only SSH, wheel and docker, so a
+full administrator). The people who play are Wolf profiles, not Linux users.
 
-```
-journalctl -u rig-gaming-guard -f
-```
+Pairing and profiles are separate things:
 
-## The three users
+- **Pairing** authorises a device.
+- **A profile** is a named user with its own apps and saves. Wolf ships one
+  (`User`) and does not create one per paired device.
 
-The people who stream are **Wolf profiles, not Unix accounts**. There is one
-Linux account on this box — `admin` (wheel + docker, key-only SSH) — and three
-shell accounts would add nothing: there is no desktop to log into, and a Wolf
-session already runs as its own container with its own `/home` and its own
-`profile-data` directory on the data disk.
+To add a profile, edit `/etc/wolf/cfg/config.toml`: copy a `[[profiles]]`
+block and change its `id` and `name`. Leave the `moonlight-profile-id` block
+alone; it holds the tiles Moonlight shows at connect time.
 
-**Profiles and pairing are two different things**, which is worth stating
-because assuming otherwise wastes an afternoon. Pairing authorises a *device*;
-a profile is a *named identity* with its own app list and save data. Wolf does
-**not** create a profile per paired client. Profiles are `[[profiles]]` blocks
-declared in `/etc/wolf/cfg/config.toml`, and Wolf ships exactly one
-(`id = 'user'`, `name = 'User'`) — so however many devices you pair, Moonlight
-shows one user until you add more.
-
-They are runtime state, not flake config: `/etc/wolf/cfg/config.toml` lives on
-the data disk and Wolf owns it. A `nixos-rebuild` never touches it. To add a
-profile, copy an existing `[[profiles]]` block and change its `id` and `name`;
-the block runs from its header to the next `[[profiles]]` or EOF and carries
-that profile's whole app list with it. Leave the special
-`id = 'moonlight-profile-id'` block alone — that one holds the Wolf UI and
-Test ball tiles Moonlight shows at connect time, and is not a user.
-
-Two traps, both hit doing this:
-
-- **Wolf rewrites `config.toml` itself.** Edit it only while the container is
-  stopped, then start it again — otherwise the running daemon overwrites the
-  change when it exits.
-- **Grepping the file does not prove Wolf loaded it.** A `docker start` racing
-  a just-written file can leave the daemon serving the previous config while
-  the file on disk already shows the new one. Ask Wolf, not the filesystem:
-
+- Wolf owns that file and writes it back when it stops. Stop Wolf, edit,
+  start it: `sudo systemctl stop docker-wolf`, then `start`.
+- A rebuild never replaces the file. It only patches the settings listed
+  below, each time Wolf starts.
+- To see what Wolf actually loaded, ask Wolf:
   ```bash
   SOCK=$(sudo find /var/lib/docker/volumes -name wolf.sock | head -1)
   sudo curl -s --unix-socket "$SOCK" http://localhost/api/v1/profiles \
     | grep -oE '"name":"[^"]*","id":"[^"]*"'
   ```
 
-  A `docker restart wolf` is what reliably re-reads it.
+## Settings
 
-Pairing a device, once the profiles exist:
+All of these are `rig.wolf.*` options, documented in `modules/wolf.nix`.
 
-1. On the client, add the host in Moonlight; it shows a PIN.
-2. Open `http://<rig-ip>:47989` and enter it.
+Detected at every boot, so a new machine needs none of them set:
 
-Note `docker` group membership is root-equivalent, so `admin` is a full admin by
-two independent routes.
+| Option | Default | Resolves to |
+|---|---|---|
+| `renderNode` | `"auto"` | the AMD GPU with the most VRAM, else NVIDIA, else Intel |
+| `encoderNode` | `"secondary"` | a second, lower-ranked GPU such as the iGPU; none: the render GPU |
+| `internalIp` | `"auto"` | source address of the default route |
+| `videoPacing.interfaces` | `[ "lan" "tailscale0" ]` | the default-route interface, plus the tailnet |
+| `cpuPriority.gameCpus` | `"auto"` | all CPUs minus the last `reservedCores` cores |
+| `encoderQualityFix` | `true` | encoder `target-usage`: 1 on AMD, 6 on Intel |
+| `advertiseTailnetRoute` | `true` | advertises `<LAN IP>/32` on the tailnet (approve once) |
 
-**Back up `/etc/wolf`.** Losing `cfg/cert.pem` un-pairs every client; losing
-`cfg/config.toml` takes both the profiles and the app list with it.
+Stream tuning, set per host:
 
-## Deliberate differences from the parent flake
+| Option | Default | What it does |
+|---|---|---|
+| `videoPacing.rate` | `"50mbit"` | ceiling for outgoing video, per connected client |
+| `fecPercentage` | `null` (Wolf: 20) | parity per frame; raise it for a link that drops short bursts |
+| `av1PaddingFix` | `true` | stops AV1 going out at up to twice the bitrate |
+| `av1StripPadding` | `false` | drops CBR padding from AV1 before it is sent |
+| `av1RateControl`, `hevcRateControl` | `"cbr"` | VBR overshoots with the AMD encoder; keep CBR |
+| `sharedSteamLibrary` | `null` | one Steam library shared by every profile |
+| `natTailnetPeers` | `[ ]` | tailnet routers that masquerade their clients (a TV behind a travel router) |
 
-| | Parent | Here | Why |
-|---|---|---|---|
-| Hostname | `miner-<machine-id>` | fixed `wolf-rig` | One specific machine that Moonlight clients find by name, not one of many interchangeable rigs |
-| `allowSuspend` | `true` | **`false`** | A suspended host does not answer Moonlight — it vanishes rather than appearing as a wakeable offline host. Wolf's session containers also survive the GPU reinit on resume badly |
-| `maxFreqPercent` | 70 | 30 | The parent's measurements put the optimum low on a CPU that dominates its system's draw. **Untested on this chip** — re-sweep and write the result to `/etc/rig/max-freq-percent` |
-| Kernel | default | `linuxPackages_latest` | Navi 48 needs amdgpu ≥ 6.13; on an older kernel there is no render node to encode with |
-| Docker | — | pinned `docker_29` | The 25.11 default (28.5.2) is marked insecure; pinning beats blanket-permitting it |
-| Swap | 4 GiB, random-encrypted | 16 GiB, plain | Hugepages are never swappable, so mining's 3.25 GiB reservation shrinks what a session can use. Random encryption would foreclose hibernation |
+Changes to the stream tuning apply the next time Wolf starts, not while
+someone is playing.
 
-## Known rough edges
-
-- **`maxFreqPercent = 30` is inherited reasoning, not a measurement** on this
-  CPU. It costs efficiency if wrong, never stream quality — the guard lifts the
-  cap for sessions regardless.
-- **Mining's hugepage reservation is permanent**: 3.25 GiB of the 30 GiB —
-  3 GiB of 1 GiB pages for the RandomX dataset plus 256 MiB of 2 MiB
-  scratchpads — held whether or not XMRig is running, because 1 GiB pages can
-  only be reserved at boot. Measured on the running machine (`Hugetlb` in
-  /proc/meminfo), not estimated.
-
-## Checks
-
-`scripts/check.sh` is what CI runs, on GitHub (`.github/workflows/check.yml`)
-and on GitLab (`.gitlab-ci.yml`), and it needs only Nix, so run it before a
-push:
-
-```sh
-scripts/check.sh         # about 20 s with a warm store
-scripts/check.sh --vm    # plus the gaming-guard VM test (KVM, minutes)
-```
-
-- no secrets in the git history or the working tree: gitleaks with its own
-  rules plus Monero addresses and SSH public keys (`.gitleaks.toml`);
-- every shell script: `bash -n` and shellcheck;
-- `modules/wolf-steam-library.sh` against a sample `config.toml`;
-- every host, the installer ISO and the install tests evaluate down to their
-  derivation (nothing is built), with the made-up settings in `ci/private`
-  standing in for the private folder;
-- without private settings a host still fails on its three guards: disks,
-  wallet, SSH key.
-
-GitHub also runs the gaming-guard VM test as a second job. GitLab does not:
-a job container has no `/dev/kvm`.
-
-### Branches and releases
-
-Work goes to `dev`; every push there runs the checks. `main` only changes
-through a pull request from `dev`, which GitHub merges only when both jobs
-are green. A tag `v*` on `main` runs `.github/workflows/release.yml`: the
-checks again, then the offline installer ISO is built and attached to a
-release of that name.
-
-```sh
-git switch dev && git commit ... && git push       # checks run
-gh pr create --base main --head dev --fill           # merge when green
-git switch main && git pull && git tag v1.1.0 && git push origin v1.1.0
-```
+Two discrete GPUs: detection logs a warning; pin `renderNode` to a
+`/dev/dri/by-path/pci-...-render` path. NVIDIA is not set up by this flake
+(it needs the proprietary driver on the host and inside Wolf's container).
 
 ## Adding a machine
 
 ```
-scripts/new-host.sh <name>        # copies hosts/wolf-rig, sets hostname and pool worker
-$EDITOR hosts/<name>/disks.nix    # disk IDs; data = null for a single-disk box
-$EDITOR hosts/<name>/default.nix  # time zone, keymap, microcode (amd/intel), SSH keys
-$EDITOR hosts/<name>/rig.nix      # wallet, MQTT broker, power user, advertiseTailnetRoute
-scripts/mk-secrets.sh <name>
-nix build .#installTest-<name>
+scripts/new-host.sh <name>        # copies hosts/wolf-rig, sets the hostname
+$EDITOR hosts/<name>/default.nix  # time zone, keymap, microcode (amd/intel)
+$EDITOR hosts/<name>/rig.nix      # MQTT broker, power user, stream tuning
 ```
 
-then install as above. The flake builds a configuration for every directory
-under `hosts/`, so `flake.nix` needs no edit; the shared disk layout is
-`modules/disko.nix`. With one disk, Docker and Wolf state live on the root
-filesystem under the same `/data/docker` and `/data/wolf` paths.
+Then add `hosts/<name>/rig.toml` to the private folder (SSH keys, disk IDs,
+wallet; `data = null` for a single disk) and install as
+[above](#over-ssh-onto-a-machine-that-is-already-running-linux).
 
+`flake.nix` needs no edit: every directory under `hosts/` is a machine.
 
-### What is detected per machine
+## Development
 
-Everything GPU-, network- and CPU-specific in `rig.wolf` is resolved at boot
-by `wolf-hw-detect.service` (`modules/wolf-hw-detect.sh`); `journalctl -u
-wolf-hw-detect` shows what it picked. With the defaults below a new host needs no
-hardware-specific settings:
+Run the checks before a push. They need only Nix and take about 20 seconds:
 
-| Option | Auto value | Resolves to |
-|---|---|---|
-| `renderNode` | `"auto"` | the AMD GPU with the most VRAM, else NVIDIA, else Intel |
-| `encoderNode` | `"secondary"` | a second (lower-ranked) GPU, e.g. the iGPU; none → render GPU |
-| `internalIp` | `"auto"` | source address of the default route |
-| `videoPacing.interfaces` | `[ "lan" "tailscale0" ]` | default-route interface, plus the tailnet |
-| `cpuPriority.gameCpus` | `"auto"` | all CPUs minus the last `reservedCores` cores and their SMT siblings |
-| `encoderQualityFix` | `true` | Wolf's VA AV1/HEVC `target-usage`: 1 on AMD, 6 on Intel |
-| `advertiseTailnetRoute` | `true` | `tailscale set --advertise-routes=<LAN IP>/32` (approve once) |
+```sh
+scripts/check.sh         # what CI runs
+scripts/check.sh --vm    # plus the gaming-guard VM test (needs KVM)
+```
 
-Stream tuning in `rig.wolf` that is not detected but set per host (all
-documented in `modules/wolf.nix`):
+What they cover:
 
-| Option | Default | What it does |
-|---|---|---|
-| `videoPacing.rate` | `"50mbit"` | per-client ceiling for outgoing video; every connected client gets its own class |
-| `fecPercentage` | `null` (Wolf: 20) | parity per frame; raise it for a client on a link that drops short bursts |
-| `av1PaddingFix` | `true` | stops `av1parse` doubling CBR padding, which sent AV1 out at up to twice the bitrate |
-| `av1StripPadding` | `false` | drops CBR padding from AV1 with a small GStreamer element built in the Wolf image (`modules/wolf-av1padstrip.c`) |
-| `av1RateControl`, `hevcRateControl` | `"cbr"` | VBR overshoots on game content with the AMD encoder; keep CBR |
-| `sharedSteamLibrary` | `null` | one Steam library directory shared by every Wolf profile |
-| `natTailnetPeers` | `[ ]` | tailnet addresses of routers that masquerade their clients (a TV behind a GL.iNet), so replies leave from the LAN address |
+- no secrets in the history or the working tree (gitleaks, plus Monero
+  addresses and SSH public keys; `.gitleaks.toml`);
+- shellcheck on every script;
+- `modules/wolf-steam-library.sh` against a sample `config.toml`;
+- every host, the installer ISO and the tests evaluate, using the made-up
+  settings in `ci/private`;
+- without private settings, a host still refuses to build.
 
-Multiple GPUs: with two discrete cards (e.g. a second gaming GPU for a second
-player) detection logs a warning; pin `renderNode` to a
-`/dev/dri/by-path/pci-…-render` path. Giving each player their own GPU needs
-per-app `render_node` entries in Wolf's `cfg/config.toml`.
+CI runs the same script on GitHub (`.github/workflows/check.yml`, which also
+runs the VM test) and on GitLab (`.gitlab-ci.yml`).
 
-Not covered: NVIDIA needs the proprietary driver on the host and mounted into
-Wolf's container, which this flake does not set up.
+Branches:
+
+```sh
+git switch dev && git commit ... && git push     # checks run on every push
+gh pr create --base main --head dev --fill       # main takes pull requests only,
+                                                 # and only when the checks pass
+git tag v1.1.0 && git push origin v1.1.0         # on main: builds the ISO and
+                                                 # publishes a release
+```
+
+## Notes
+
+What differs from the parent flake, and why:
+
+| | Parent | Here | Why |
+|---|---|---|---|
+| Hostname | `miner-<machine-id>` | fixed | Moonlight clients find this machine by name |
+| Suspend | allowed | off | A suspended host does not answer Moonlight, and Wolf's containers do not survive a resume well |
+| Kernel | default | latest | The RX 9070 XT needs amdgpu from 6.13 on |
+| Docker | default | pinned `docker_29` | The default version was marked insecure |
+| Swap | 4 GiB, encrypted | 16 GiB, plain | Mining's hugepages are never swappable and shrink what a session can use |
+
+Mining's hugepages are reserved at boot and stay reserved while a game runs
+(3.25 GiB on the reference machine), because 1 GiB pages cannot be allocated
+later.
