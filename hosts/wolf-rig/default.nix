@@ -205,6 +205,27 @@
       fi
       exec nixos-rebuild "$@" --flake "/etc/nixos#$(cat /proc/sys/kernel/hostname)" "''${args[@]}"
     '')
+    # Plain `nixos-rebuild` does the same whenever it is building this flake
+    # (no --flake, or one pointing at /etc/nixos), so the usual command works.
+    (lib.hiPrio (writeShellScriptBin "nixos-rebuild" ''
+      private=/etc/nixos-private
+      flake= prev=
+      for a in "$@"; do
+        [ "$prev" = --flake ] && flake=$a
+        case $a in --flake=*) flake=''${a#--flake=} ;; esac
+        prev=$a
+      done
+      dir=''${flake%%#*}
+      args=()
+      if [ "$(${coreutils}/bin/realpath -m "''${dir:-/etc/nixos}")" = /etc/nixos ]; then
+        if [ -d "$private/.git" ]; then
+          args+=(--override-input private "git+file://$private")
+        elif [ -d "$private" ]; then
+          args+=(--override-input private "path:$private")
+        fi
+      fi
+      exec ${config.system.build.nixos-rebuild}/bin/nixos-rebuild "$@" "''${args[@]}"
+    ''))
   ];
 
   # iperf3 server reachable over the tailnet only.

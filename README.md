@@ -102,6 +102,9 @@ cp -r private.example /etc/nixos-private     # then edit hosts/<host>/rig.toml
 sudo rig-rebuild switch
 ```
 
+Plain `nixos-rebuild switch` works too: on an installed rig it is wrapped to
+add the same input whenever it builds `/etc/nixos`.
+
 `rig-rebuild` is `nixos-rebuild --flake /etc/nixos#<hostname>` with
 `--override-input private git+file:///etc/nixos-private` added (`path:` if
 the folder is not a git repository). For any other `nix` command on the real
