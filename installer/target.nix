@@ -11,10 +11,14 @@
 #   hostname  Empty here, so NixOS leaves /etc/hostname alone; the installer
 #             writes the name the user chose there.
 #
-# Whisper (modules/whisper.nix) is not part of it: its model alone is 3 GB,
-# more than the rest of the system's closure that matters on a USB stick. The
-# per-host configuration the installer writes to /etc/nixos does include it,
-# so the first online rebuild adds it.
+# What the machine does (streaming, mining or both) is the installer's first
+# question; the flake builds this file once per answer (mkTarget in
+# flake.nix) and the stick carries them all.
+#
+# Whisper (modules/whisper.nix) is not part of any of them: its model alone
+# is 3 GB, more than the rest of the system's closure that matters on a USB
+# stick. It is one switch in the per-host configuration the installer writes
+# to /etc/nixos, off until the owner turns it on.
 
 {
   imports = [
@@ -29,6 +33,8 @@
   ];
 
   networking.hostName = lib.mkForce "";
+
+  rig.modules.whisper = lib.mkForce false;
 
   # Personal settings come from files the installer writes, not from the
   # image, so the same ISO can be handed to anyone: the Monero address, and

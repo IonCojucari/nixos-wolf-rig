@@ -62,35 +62,72 @@
         ./modules/wolf.nix
         ./modules/tailscale.nix
         ./modules/gaming-guard.nix
+        ./modules/whisper.nix
+        ./modules/gitlab.nix
+        ./modules/gitlab-runner.nix
+        ./modules/tcp-bbr.nix
         ./modules/admin.nix
+        ./modules/modules.nix
+      ];
+
+      # Kept apart from the list above for the module VM tests, which boot
+      # from a disk image of their own.
+      diskModules = [
         disko.nixosModules.disko
         ./modules/disko.nix
       ];
 
       mkHost = name: lib.nixosSystem {
         inherit system;
-        modules = [ ./hosts/${name} ./modules/whisper.nix ]
-          ++ rigModules
+        modules = [ ./hosts/${name} ]
+          ++ rigModules ++ diskModules
           ++ privateModules name;
       };
 
-      # The offline installer: one ISO with two prebuilt targets, picked by
-      # rig-install from the disks the user chooses (installer/).
-      mkTarget = data: lib.nixosSystem {
+      # The offline installer: one ISO with a prebuilt target for every
+      # answer rig-install can get -- what the machine should do (stream and
+      # mine, stream only, mine only) times one or two disks (installer/).
+      # They share almost every store path, so six systems cost the stick
+      # little more than one.
+      mkTarget = { data, streaming, mining }: lib.nixosSystem {
         inherit system;
         modules = [ ./installer/target.nix ]
-          ++ rigModules
-          ++ [{ rig.disk.data = lib.mkForce data; }];
+          ++ rigModules ++ diskModules
+          ++ [{
+            rig.disk.data = lib.mkForce data;
+            rig.modules.streaming = lib.mkForce streaming;
+            rig.modules.mining = lib.mkForce mining;
+          }];
       };
+
+      installerRoles = {
+        both = { streaming = true; mining = true; };
+        streaming = { streaming = true; mining = false; };
+        mining = { streaming = false; mining = true; };
+      };
+
+      moduleTests = import ./tests/modules.nix { inherit pkgs lib rigModules; };
+
+      # The USB installer run for real, per role:  nix build .#installerTest-<role> -L
+      installerTests = import ./tests/installer.nix {
+        inherit pkgs lib;
+        targets = installerTargets;
+        flakeSource = self;
+      };
+
+      # installerTargets.<role>.oneDisk / .twoDisks
+      installerTargets = lib.mapAttrs
+        (_: role: {
+          oneDisk = mkTarget (role // { data = null; });
+          twoDisks = mkTarget (role // { data = "/dev/rig-data"; });
+        })
+        installerRoles;
 
       installer = lib.nixosSystem {
         inherit system;
         specialArgs = {
           flakeSource = self;
-          targets = {
-            oneDisk = mkTarget null;
-            twoDisks = mkTarget "/dev/rig-data";
-          };
+          targets = installerTargets;
         };
         modules = [ ./installer/iso.nix ];
       };
@@ -178,6 +215,9 @@
 
       packages.${system} =
         lib.listToAttrs (map (name: lib.nameValuePair "installTest-${name}" (mkInstallTest name)) hostNames)
+        # One VM test per module:  nix build .#moduleTest-<name> -L
+        // lib.mapAttrs' (name: lib.nameValuePair "moduleTest-${name}") moduleTests
+        // lib.mapAttrs' (name: lib.nameValuePair "installerTest-${name}") installerTests
         // {
         # The name this flake used before it had more than one host.
         installTest = mkInstallTest "wolf-rig";
@@ -187,6 +227,15 @@
         #
         #   nix build .#installerIso
         installerIso = installer.config.system.build.isoImage;
+
+        # The systems the ISO carries, one link per role and disk layout
+        # (both-oneDisk, mining-twoDisks, ...): to build or compare them
+        # without building the image.
+        installerSystems = pkgs.linkFarm "installer-systems" (lib.concatLists (lib.mapAttrsToList
+          (role: t: lib.mapAttrsToList
+            (disks: sys: { name = "${role}-${disks}"; path = sys.config.system.build.toplevel; })
+            t)
+          installerTargets));
 
         # VM integration test for the gaming-guard docker-hang fix:
         #

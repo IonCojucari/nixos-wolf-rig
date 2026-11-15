@@ -14,6 +14,20 @@
 # Not for passwords or tokens: this file ends up in /nix/store, which every
 # local user can read. Those stay in the files scripts/mk-secrets.sh writes.
 
+# What the machine runs: one switch per module (modules/modules.nix). The
+# values below are the ones hosts/wolf-rig/rig.nix sets; list only what you
+# change.
+# [rig.modules]
+# streaming = true      # Wolf, for Moonlight clients
+# mining = true         # XMRig; stops while someone streams
+# power = true          # Wake-on-LAN and shutdown from Home Assistant
+# mqtt = false          # also needs [rig.mqtt] broker and /etc/mqtt/password
+# tailscale = true
+# whisper = true        # the `transcribe` command, a 3 GB model
+# gitlab = false        # also needs [rig.gitlab] host
+# gitlabRunner = false
+# tcpBbr = false
+
 # [rig.admin]
 # name = "admin"
 # sshKeys = [ "ssh-ed25519 AAAA... you@laptop" ]
@@ -29,7 +43,6 @@
 # wallet = "4..."
 
 # [rig.mqtt]
-# enable = true
 # broker = "192.168.1.10"
 
 # [rig.wolf]
