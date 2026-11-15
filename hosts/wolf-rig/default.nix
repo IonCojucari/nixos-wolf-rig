@@ -182,6 +182,8 @@
     (btop.override { rocmSupport = true; })
     tmux
     git
+    # GitHub CLI: gh auth login, then gh run watch / gh pr ... for the CI.
+    gh
     pciutils
     lm_sensors
     # Reads /dev/dri/by-path to confirm which render node is which card --

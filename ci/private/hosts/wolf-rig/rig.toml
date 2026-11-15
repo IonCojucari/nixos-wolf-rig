@@ -1,0 +1,21 @@
+# Stand-in private settings for CI, nothing else.
+#
+# The repository's own defaults are placeholders that fail the build on
+# purpose (no disks, no wallet, no SSH key), so the checks plug this folder in
+# as the `private` input to get a configuration that evaluates:
+#
+#   scripts/check.sh
+#
+# Every value is made up. Never install a machine with it, and never put a
+# real value here: the real ones live outside the repository (see
+# private.example/).
+
+[rig.admin]
+sshKeys = [ "ssh-ed25519 AAAA... ci@example.invalid" ]
+
+[rig.disk]
+system = "/dev/disk/by-id/ci-system-disk"
+data = "/dev/disk/by-id/ci-data-disk"
+
+[rig.mining.pool]
+wallet = "CI_NOT_A_WALLET"
