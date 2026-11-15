@@ -4,8 +4,11 @@
 # same thing by hand before a push:
 #
 #   scripts/check.sh           everything below
-#   scripts/check.sh --vm      plus the gaming-guard VM test (needs KVM,
-#                              several minutes)
+#   scripts/check.sh --vm      plus the VM tests: one per module
+#                              (tests/modules.nix), the USB installer per
+#                              role (tests/installer.nix) and the gaming
+#                              guard. Needs KVM, 12 GiB of free RAM and
+#                              about half an hour.
 #
 # Needs only Nix (and git, for the secret scan). Nothing is built except small scripts; the systems are
 # evaluated down to their derivation, which is what catches a missing module,
@@ -52,6 +55,15 @@ if nix shell --inputs-from . nixpkgs#shellcheck -c shellcheck -S warning "${scri
   echo "ok  ${#scripts[@]} scripts"
 else
   fail "shellcheck"
+fi
+
+# --- workflows ---------------------------------------------------------------
+step "GitHub workflows are valid (actionlint)"
+# A workflow GitHub cannot parse does not fail: it does not run at all.
+if nix shell --inputs-from . nixpkgs#actionlint -c actionlint .github/workflows/*.yml; then
+  echo "ok  $(ls .github/workflows/*.yml | wc -l) workflows"
+else
+  fail "actionlint"
 fi
 
 # --- secrets -----------------------------------------------------------------
@@ -114,6 +126,31 @@ for h in "${hosts[@]}"; do
   fi
 done
 
+step "Module switches: a host evaluates with any of them flipped"
+# rig.modules (modules/modules.nix). The guard follows the others: on only
+# when there is a miner and something for it to yield to.
+flip() { # $1 host, $2 label, $3 module settings, $4 expected "wolf mining guard"
+  local expr="h: let c = (h.extendModules { modules = [ { rig.modules = h.pkgs.lib.mapAttrs (_: h.pkgs.lib.mkOverride 10) { $3 }; } ]; }).config;
+    in builtins.seq c.system.build.toplevel.drvPath
+      \"\${toString c.rig.wolf.enable} \${toString c.rig.mining.enable} \${toString c.rig.gamingGuard.enable}\""
+  local got
+  if got=$(nix eval --raw ".#nixosConfigurations.$1" "${ci_private[@]}" --apply "$expr" 2> "$tmp/err"); then
+    # toString true = "1", toString false = ""
+    if [ "$got" = "$4" ]; then echo "ok  $1: $2"; else fail "$1, $2: wolf/mining/guard = '$got', expected '$4'"; fi
+  else
+    grep -v '^evaluation warning' "$tmp/err" | tail -30
+    fail "$1 does not evaluate with $2"
+  fi
+}
+for h in "${hosts[@]}"; do
+  [ -f "ci/private/hosts/$h/rig.toml" ] || continue
+  flip "$h" "streaming only"    "mining = false; streaming = true;"  "1  "
+  flip "$h" "mining only"       "streaming = false; mining = true;"  " 1 "
+  flip "$h" "streaming + mining" "streaming = true; mining = true;"  "1 1 1"
+  flip "$h" "every module off"  "streaming = false; mining = false; power = false; mqtt = false; tailscale = false; whisper = false; gitlab = false; gitlabRunner = false; tcpBbr = false;" "  "
+  flip "$h" "mining + GitLab runner" "streaming = false; mining = true; gitlabRunner = true;" " 1 1"
+done
+
 step "Placeholders still stop the build"
 # The opposite check: without private settings a host must NOT evaluate, and
 # each of the three guards has to be the reason.
@@ -129,15 +166,29 @@ done
 
 step "Installer ISO and tests evaluate"
 drv "packages.$system.installerIso"
+drv "packages.$system.installerSystems"
 drv "packages.$system.gamingGuardTest"
+vm_tests=$(nix eval --raw ".#packages.$system" --apply \
+  'p: builtins.concatStringsSep " " (builtins.filter (n: builtins.match "(moduleTest|installerTest)-.*" n != null) (builtins.attrNames p))' 2> "$tmp/err") \
+  || { tail -20 "$tmp/err"; fail "list the VM tests"; }
+for t in $vm_tests; do
+  drv "packages.$system.$t"
+done
 for h in "${hosts[@]}"; do
   drv "packages.$system.installTest-$h" "${ci_private[@]}"
 done
 
 # --- VM test -----------------------------------------------------------------
 if [ -n "$vm" ]; then
-  step "Gaming guard VM test"
-  nix build ".#packages.$system.gamingGuardTest" --no-link -L || fail "gamingGuardTest"
+  for t in gamingGuardTest $vm_tests; do
+    step "VM test: $t"
+    if nix build ".#packages.$system.$t" --no-link -L > "$tmp/vm.log" 2>&1; then
+      echo "ok  $t"
+    else
+      tail -60 "$tmp/vm.log"
+      fail "VM test $t"
+    fi
+  done
 fi
 
 echo

@@ -2,26 +2,15 @@
 
 # Offline installer ISO:  nix build .#installerIso
 #
-# A NixOS live system with `rig-install` (installer/rig-install.sh). Both
-# prebuilt targets -- the single-disk and the two-disk layout of
-# installer/target.nix -- and their partitioning scripts are referenced from
-# that script, so they and everything they depend on are on the stick, and
-# installing needs no network.
+# A NixOS live system with `rig-install` (installer/rig-install.sh). Every
+# prebuilt target -- installer/target.nix for each role (stream and mine,
+# stream only, mine only) in the single-disk and the two-disk layout -- and
+# the partitioning scripts are referenced from that script, so they and
+# everything they depend on are on the stick, and installing needs no
+# network.
 
 let
-  disko = t: "${t.config.system.build.destroyFormatMount}/bin/disko-destroy-format-mount";
-
-  rigInstall = pkgs.writeShellScriptBin "rig-install" (builtins.replaceStrings
-    [ "@system1@" "@disko1@" "@system2@" "@disko2@" "@flake@" "@admin@" ]
-    [
-      "${targets.oneDisk.config.system.build.toplevel}"
-      (disko targets.oneDisk)
-      "${targets.twoDisks.config.system.build.toplevel}"
-      (disko targets.twoDisks)
-      "${flakeSource}"
-      targets.oneDisk.config.rig.admin.name
-    ]
-    (builtins.readFile ./rig-install.sh));
+  rigInstall = import ./rig-install.nix { inherit lib pkgs targets flakeSource; };
 in
 {
   imports = [ "${modulesPath}/installer/cd-dvd/installation-cd-minimal.nix" ];

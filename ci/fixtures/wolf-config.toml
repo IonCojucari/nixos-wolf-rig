@@ -39,3 +39,9 @@ id = 'second'
         mounts = []
         name = 'WolfSteam'
         type = 'docker'
+
+# What the wolf-config unit edits (tests/modules.nix, streaming).
+[gstreamer.video]
+default_sink = '''
+rtpmoonlightpay_video name=moonlight_pay payload_size={payload_size} fec_percentage={fec_percentage} min_required_fec_packets={min_required_fec_packets}
+'''

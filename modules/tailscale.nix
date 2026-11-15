@@ -27,8 +27,12 @@
 # Neither step is automatable from here without handing this config a
 # credential, and both are one-time per node.
 {
-  services.tailscale = {
-    enable = true;
-    useRoutingFeatures = "none";
+  options.rig.tailscale.enable = lib.mkEnableOption "a tailnet identity for this machine (Tailscale)";
+
+  config = lib.mkIf config.rig.tailscale.enable {
+    services.tailscale = {
+      enable = true;
+      useRoutingFeatures = "none";
+    };
   };
 }

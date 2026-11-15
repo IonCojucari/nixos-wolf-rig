@@ -1,7 +1,7 @@
 { config, pkgs, lib, ... }:
 
 {
-  imports = [ ./rig.nix ./disks.nix ../../modules/gitlab.nix ../../modules/gitlab-runner.nix ../../modules/tcp-bbr.nix ];
+  imports = [ ./rig.nix ./disks.nix ];
 
   # ---------------------------------------------------------------------------
   # Boot / kernel
@@ -130,7 +130,9 @@
   users.users.${config.rig.admin.name} = {
     isNormalUser = true;
     description = "Administrator";
-    extraGroups = [ "wheel" "docker" ];
+    # docker only exists where a module brings Docker in (streaming, the
+    # GitLab runner).
+    extraGroups = [ "wheel" ] ++ lib.optional config.virtualisation.docker.enable "docker";
 
     # Console fallback, shipped by `nixos-anywhere --extra-files` at install
     # time (scripts/mk-secrets.sh writes it). Out-of-store because everything

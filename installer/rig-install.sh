@@ -5,14 +5,15 @@
 #
 # Interactive by default. For unattended installs (and the VM test) every
 # question can be answered from the environment:
+#   RIG_ROLE=both|streaming|mining
 #   RIG_SYSTEM_DISK=/dev/nvme0n1  RIG_DATA_DISK=/dev/nvme1n1|none
 #   RIG_HOSTNAME=wolf-node  RIG_ADMIN_PASSWORD=...
 #   RIG_SSH_KEY="ssh-ed25519 ..."  RIG_WALLET=4...  (empty string = skip)
 #   RIG_YES=1  (skip the ERASE confirmation)
 #
 # Placeholders filled in by installer/iso.nix:
-#   @system1@ @disko1@  single-disk system and its partitioning script
-#   @system2@ @disko2@  two-disk system and its partitioning script
+#   the systems line    the prebuilt systems, as systems[<role><disks>]=<path>
+#   @disko1@ @disko2@   partitioning script for one disk / for two
 #   @flake@             this flake's source, copied to /etc/nixos
 #   @admin@             the administrator's login (rig.admin.name)
 set -euo pipefail
@@ -20,6 +21,8 @@ set -euo pipefail
 [ "$(id -u)" = 0 ] || exec sudo -E "$0" "$@"
 
 admin=@admin@
+declare -A systems
+@systems@
 
 bold() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 die()  { printf '\n\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -93,14 +96,45 @@ by_id() { # stable /dev/disk/by-id name for a whole disk, for /etc/nixos
 }
 
 bold "Wolf rig installer (offline)"
-echo "This installs NixOS with the Wolf game-streaming and mining configuration."
+echo "This installs NixOS as a game-streaming host, a Monero miner, or both."
 echo "Nothing is downloaded: the whole system is on this USB stick."
 
+# --- role --------------------------------------------------------------------
+bold "1. What should this machine do?"
+echo "  1  Stream games and mine   (mining stops while someone plays)"
+echo "  2  Stream games only       (Wolf, for Moonlight clients)"
+echo "  3  Mine only               (XMRig)"
+echo "Everything else (Tailscale, Home Assistant, Whisper, GitLab) is a switch"
+echo "in /etc/nixos after the install."
+if [ -n "${RIG_ROLE:-}" ]; then
+  role=$RIG_ROLE
+else
+  while true; do
+    read -rp $'\nChoice [1]: ' n
+    case "${n:-1}" in
+      1) role=both; break ;;
+      2) role=streaming; break ;;
+      3) role=mining; break ;;
+      *) echo "  Enter 1, 2 or 3." >&2 ;;
+    esac
+  done
+fi
+case "$role" in
+  both)      streaming=true;  mining=true ;;
+  streaming) streaming=true;  mining=false ;;
+  mining)    streaming=false; mining=true ;;
+  *) die "RIG_ROLE must be both, streaming or mining." ;;
+esac
+
 # --- disks -------------------------------------------------------------------
-bold "1. Disks"
+bold "2. Disks"
 echo "The SYSTEM disk gets the boot partition, swap and the OS."
-echo "An optional DATA disk gets Docker, Wolf and the game libraries; without"
-echo "one they live on the system disk."
+if [ "$streaming" = true ]; then
+  echo "An optional DATA disk gets Docker, Wolf and the game libraries; without"
+  echo "one they live on the system disk."
+else
+  echo "A DATA disk is optional and of little use on a machine that only mines."
+fi
 list_disks
 [ -n "$bootdisk" ] && echo "  (the USB stick, /dev/$bootdisk, is not listed)"
 
@@ -119,7 +153,7 @@ if [ "$data" != none ]; then
 fi
 
 # --- identity ----------------------------------------------------------------
-bold "2. Name and passwords"
+bold "3. Name and passwords"
 if [ -n "${RIG_HOSTNAME:-}" ]; then
   host=$RIG_HOSTNAME
 else
@@ -144,12 +178,15 @@ fi
 admin_pw=${RIG_ADMIN_PASSWORD-$(ask_password "Console password for $admin")}
 [ -n "$ssh_key" ] || [ -n "$admin_pw" ] || die "set an SSH key or a console password, or nobody can log in."
 
-echo
-echo "Monero address to mine to. Empty: mining stays off until you put one in"
-echo "/etc/xmrig/wallet."
-if [ -n "${RIG_WALLET+x}" ]; then
+wallet=""
+if [ "$mining" != true ]; then
+  :
+elif [ -n "${RIG_WALLET+x}" ]; then
   wallet=$RIG_WALLET
 else
+  echo
+  echo "Monero address to mine to. Empty: mining stays off until you put one in"
+  echo "/etc/xmrig/wallet."
   while true; do
     read -rp "Monero address (Enter to skip): " wallet
     [ -z "$wallet" ] && break
@@ -159,7 +196,12 @@ else
 fi
 
 # --- confirm -----------------------------------------------------------------
-bold "3. Confirm"
+bold "4. Confirm"
+case "$role" in
+  both)      echo "  role         game streaming and mining" ;;
+  streaming) echo "  role         game streaming only" ;;
+  mining)    echo "  role         mining only" ;;
+esac
 echo "  system disk  $sys  ($(lsblk -dno SIZE,MODEL "$sys" | xargs))"
 if [ "$data" != none ]; then
   echo "  data disk    $data  ($(lsblk -dno SIZE,MODEL "$data" | xargs))"
@@ -168,7 +210,9 @@ else
 fi
 echo "  hostname     $host"
 echo "  login        $([ -n "$ssh_key" ] && echo "SSH key")$([ -n "$ssh_key" ] && [ -n "$admin_pw" ] && echo " + ")$([ -n "$admin_pw" ] && echo "console password")"
-echo "  mining       $([ -n "$wallet" ] && echo "to ${wallet:0:12}..." || echo "off (no wallet)")"
+if [ "$mining" = true ]; then
+  echo "  mining       $([ -n "$wallet" ] && echo "to ${wallet:0:12}..." || echo "off until /etc/xmrig/wallet exists")"
+fi
 printf '\n\033[31mEVERYTHING ON THE DISK(S) ABOVE WILL BE ERASED.\033[0m\n'
 if [ "${RIG_YES:-}" != 1 ]; then
   read -rp "Type ERASE to continue: " ok
@@ -177,10 +221,11 @@ fi
 
 # --- install -----------------------------------------------------------------
 if [ "$data" = none ]; then
-  system=@system1@; disko=@disko1@
+  system=${systems[${role}1]}; disko=@disko1@
 else
-  system=@system2@; disko=@disko2@
+  system=${systems[${role}2]}; disko=@disko2@
 fi
+[ -e "$system" ] || die "this stick has no system for role '$role'."
 
 bold "Partitioning"
 # The prebuilt layouts partition /dev/rig-system and /dev/rig-data; point
@@ -221,7 +266,7 @@ bold "Writing /etc/nixos for later rebuilds"
 # The flake, plus hosts/<name>: the system that was just installed, with
 # this machine's name and real disk IDs, so that
 #   nixos-rebuild switch --flake /etc/nixos#<name>
-# rebuilds exactly it (plus Whisper, which the stick leaves out).
+# rebuilds exactly it.
 cp -r @flake@ /mnt/etc/nixos
 chmod -R u+w /mnt/etc/nixos
 if [ "$data" = none ]; then data_nix=null; else data_nix="\"$(by_id "$data")\""; fi
@@ -241,6 +286,21 @@ cat > "/mnt/etc/nixos/hosts/$host/default.nix" <<EOF
   networking.hostName = lib.mkOverride 40 "$host";
   rig.mining.pool.workerName = lib.mkOverride 40 "$host";
 
+  # What this machine runs. Change a line, then:
+  #   sudo nixos-rebuild switch --flake /etc/nixos#$host
+  # The settings of each module are in hosts/wolf-rig/rig.nix.
+  rig.modules = lib.mapAttrs (_: lib.mkOverride 40) {
+    streaming = $streaming; # Wolf, for Moonlight clients
+    mining = $mining; # XMRig
+    power = true; # Wake-on-LAN and shutdown from Home Assistant
+    mqtt = false; # needs rig.mqtt.broker and /etc/mqtt/password
+    tailscale = true; # then: sudo tailscale up
+    whisper = false; # speech-to-text, downloads a 3 GB model
+    gitlab = false; # needs rig.gitlab.host
+    gitlabRunner = false;
+    tcpBbr = false;
+  };
+
   rig.disk = {
     system = lib.mkOverride 40 "$(by_id "$sys")";
     data = lib.mkOverride 40 $data_nix;
@@ -257,11 +317,18 @@ cat <<EOF
 Remove the USB stick and reboot:   reboot
 
 After the first boot (needs internet):
+EOF
+if [ "$streaming" = true ]; then
+  cat <<EOF
   - Wolf downloads its container on first start; pair Moonlight at
     http://<this machine's IP>:47989
+EOF
+fi
+cat <<EOF
   - Tailscale:  sudo tailscale up   (then sign the node: tailnet lock)
-  - Full config incl. Whisper:  sudo nixos-rebuild switch --flake /etc/nixos#$host
-  - Home Assistant over MQTT is off in this image (the broker's address is
-    part of the configuration): set rig.mqtt.enable and rig.mqtt.broker,
-    put the broker password in /etc/mqtt/password (mode 600), rebuild.
+  - To turn modules on or off (streaming, mining, Whisper, GitLab, ...):
+    edit rig.modules in /etc/nixos/hosts/$host/default.nix, then
+    sudo nixos-rebuild switch --flake /etc/nixos#$host
+  - Home Assistant over MQTT also needs rig.mqtt.broker and the broker
+    password in /etc/mqtt/password (mode 600).
 EOF

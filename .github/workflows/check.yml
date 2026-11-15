@@ -27,7 +27,7 @@ jobs:
       - uses: cachix/install-nix-action@v31
       - run: scripts/check.sh
 
-  vm-test:
+  guard-test:
     name: Gaming guard VM test
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -39,3 +39,49 @@ jobs:
           extra_nix_config: |
             system-features = nixos-test benchmark big-parallel kvm
       - run: nix build .#gamingGuardTest --no-link -L
+
+  vm-tests-list:
+    name: List VM tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      tests: ${{ steps.list.outputs.tests }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - id: list
+        # Every moduleTest-<name> (tests/modules.nix) and
+        # installerTest-<role> (tests/installer.nix) the flake has, so a new
+        # test needs no edit here.
+        run: |
+          tests=$(nix eval --json .#packages.x86_64-linux --apply \
+            'p: builtins.filter (n: builtins.match "(moduleTest|installerTest)-.*" n != null) (builtins.attrNames p)')
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+
+  vm-test:
+    name: VM test
+    needs: vm-tests-list
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        test: ${{ fromJSON(needs.vm-tests-list.outputs.tests) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            system-features = nixos-test benchmark big-parallel kvm
+      - run: nix build .#${{ matrix.test }} --no-link -L
+
+  vm-tests:
+    # One result for the whole matrix, to name in the branch protection.
+    name: VM tests
+    needs: vm-test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.vm-test.result }}" = success

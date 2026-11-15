@@ -11,6 +11,7 @@ two-disk layout.
 
 - [How it works](#how-it-works)
 - [Install](#install)
+- [Choosing what the machine runs](#choosing-what-the-machine-runs)
 - [Private settings](#private-settings)
 - [After installing](#after-installing)
 - [Users and pairing](#users-and-pairing)
@@ -62,14 +63,15 @@ Requirements: x86-64, UEFI, an AMD or Intel GPU, 16 GB RAM or more.
 1. Download the ISO from the [releases page](../../releases) and write it to
    a USB stick (Ventoy, Balena Etcher or `dd`).
 2. Boot the machine from it and run `sudo rig-install`.
-3. Answer the questions: system disk, optional data disk, hostname, an SSH
-   key and/or a console password for `admin`, and optionally a Monero
+3. Answer the questions: what the machine should do (stream and mine,
+   stream only, or mine only), system disk, optional data disk, hostname, an
+   SSH key and/or a console password for `admin`, and, if it mines, a Monero
    address.
 4. Type `ERASE`. It partitions, installs and writes `/etc/nixos`.
 
-Nothing is downloaded during the install. After the first boot, with
-internet, `sudo nixos-rebuild switch --flake /etc/nixos#<hostname>` adds what
-the stick leaves out (Whisper).
+Nothing is downloaded during the install. Everything else is a switch you
+turn on afterwards, with internet: see
+[Choosing what the machine runs](#choosing-what-the-machine-runs).
 
 Build the ISO yourself with `nix build .#installerIso`.
 
@@ -104,6 +106,37 @@ back on the same address. Reserve that address for the machine on your router
 first.
 
 Later changes, on the machine: `sudo nixos-rebuild switch`.
+
+## Choosing what the machine runs
+
+Each part of the system is a module with one switch, all in one block:
+
+| Switch | What it adds |
+|---|---|
+| `streaming` | Wolf, for Moonlight clients (brings Docker) |
+| `mining` | XMRig. With `streaming` or `gitlabRunner` also on, the gaming guard pauses it while they need the CPU |
+| `power` | Wake-on-LAN and remote shutdown for Home Assistant |
+| `mqtt` | announces the rig to Home Assistant; needs `power`, `rig.mqtt.broker` and `/etc/mqtt/password` |
+| `tailscale` | a tailnet address, for remote streaming and SSH |
+| `whisper` | speech-to-text, the `transcribe` command (a 3 GB model) |
+| `gitlab` | GitLab CE; needs `rig.gitlab.host` |
+| `gitlabRunner` | GitLab Runner with the Docker executor |
+| `tcpBbr` | BBR congestion control |
+
+Where the block is:
+
+- A machine installed from the USB stick: `rig.modules` in
+  `/etc/nixos/hosts/<hostname>/default.nix`.
+- A host in this repository: `rig.modules` in `hosts/<host>/rig.nix`, or
+  without touching the repository, in the private `rig.toml`:
+  ```toml
+  [rig.modules]
+  mining = false
+  whisper = false
+  ```
+
+Then `sudo nixos-rebuild switch`. A module that is switched off keeps its
+settings; they are just not used.
 
 ## Private settings
 
@@ -218,7 +251,7 @@ Two discrete GPUs: detection logs a warning; pin `renderNode` to a
 ```
 scripts/new-host.sh <name>        # copies hosts/wolf-rig, sets the hostname
 $EDITOR hosts/<name>/default.nix  # time zone, keymap, microcode (amd/intel)
-$EDITOR hosts/<name>/rig.nix      # MQTT broker, power user, stream tuning
+$EDITOR hosts/<name>/rig.nix      # rig.modules, MQTT broker, stream tuning
 ```
 
 Then add `hosts/<name>/rig.toml` to the private folder (SSH keys, disk IDs,
@@ -233,21 +266,42 @@ Run the checks before a push. They need only Nix and take about 20 seconds:
 
 ```sh
 scripts/check.sh         # what CI runs
-scripts/check.sh --vm    # plus the gaming-guard VM test (needs KVM)
+scripts/check.sh --vm    # plus the VM tests (needs KVM, several minutes)
 ```
 
 What they cover:
 
 - no secrets in the history or the working tree (gitleaks, plus Monero
   addresses and SSH public keys; `.gitleaks.toml`);
-- shellcheck on every script;
+- shellcheck on every script, actionlint on the GitHub workflows;
 - `modules/wolf-steam-library.sh` against a sample `config.toml`;
 - every host, the installer ISO and the tests evaluate, using the made-up
   settings in `ci/private`;
+- a host still evaluates with its module switches flipped (streaming only,
+  mining only, everything off);
 - without private settings, a host still refuses to build.
 
-CI runs the same script on GitHub (`.github/workflows/check.yml`, which also
-runs the VM test) and on GitLab (`.gitlab-ci.yml`).
+The VM tests boot the system in QEMU and check that it works:
+
+| Test | What it checks |
+|---|---|
+| `moduleTest-none` | every switch off: no miner, no Docker, no Wolf |
+| `moduleTest-mining` | XMRig runs, its API wants the token, no guard on its own |
+| `moduleTest-streaming` | hardware detection, Docker, Wolf's `config.toml` patched before Wolf starts, firewall |
+| `moduleTest-power` | `rig-power` verbs, and that the `ha` user can run it and nothing else |
+| `moduleTest-mqtt` | the rig announces itself on a broker in the VM |
+| `moduleTest-tailscale`, `-tcpBbr`, `-gitlabRunner`, `-gitlab` | the daemon, the sysctl, the skipped runner, the generated secrets |
+| `gamingGuardTest` | mining stops for a session and comes back, also with Docker frozen |
+| `installerTest-streaming`, `-mining`, `-both` | the USB installer: `rig-install` partitions empty disks and installs offline, then the machine boots from them |
+| `installTest-<host>` | the same for the nixos-anywhere path (not run by CI) |
+
+Run one with `nix build .#moduleTest-mining -L`. A VM has no network and no
+real GPU, so Wolf itself and Whisper are not started in any of them, and the
+installer tests do not boot the ISO image itself.
+
+CI runs `scripts/check.sh` on GitHub (`.github/workflows/check.yml`, which
+also runs every VM test as its own job) and on GitLab (`.gitlab-ci.yml`,
+without the VM tests: its job containers have no `/dev/kvm`).
 
 Branches:
 

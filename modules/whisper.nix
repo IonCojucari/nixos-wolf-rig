@@ -1,4 +1,4 @@
-{ pkgs, ... }:
+{ config, lib, pkgs, ... }:
 
 # Speech-to-text for video/audio files, on the RX 9070 XT.
 #
@@ -83,9 +83,13 @@ let
   };
 in
 {
-  environment.systemPackages = [
-    transcribe
-    pkgs.whisper-cpp-vulkan
-    pkgs.ffmpeg-headless
-  ];
+  options.rig.whisper.enable = lib.mkEnableOption "speech-to-text with whisper.cpp (the `transcribe` command)";
+
+  config = lib.mkIf config.rig.whisper.enable {
+    environment.systemPackages = [
+      transcribe
+      pkgs.whisper-cpp-vulkan
+      pkgs.ffmpeg-headless
+    ];
+  };
 }

@@ -5,11 +5,27 @@
 
 {
   # ---------------------------------------------------------------------------
+  # What this machine runs
+  # ---------------------------------------------------------------------------
+  # One switch per module (modules/modules.nix). The settings of each module
+  # are further down and stay there when its switch is off. The private
+  # rig.toml can flip any of them:  [rig.modules]  mining = false
+  rig.modules = {
+    streaming = true; # Wolf, for Moonlight clients
+    mining = true; # XMRig; stops while someone streams
+    power = true; # Wake-on-LAN and shutdown from Home Assistant
+    mqtt = false; # needs a broker and /etc/mqtt/password
+    tailscale = true; # remote streaming and SSH
+    whisper = true; # the `transcribe` command (3 GB model)
+    gitlab = false; # needs rig.gitlab.host
+    gitlabRunner = false;
+    tcpBbr = false;
+  };
+
+  # ---------------------------------------------------------------------------
   # Streaming
   # ---------------------------------------------------------------------------
   rig.wolf = {
-    enable = true;
-
     # Everything machine-specific is resolved at boot by wolf-hw-detect
     # (modules/wolf-hw-detect.sh); `journalctl -u wolf-hw-detect` shows what
     # it picked. On this box that is:
@@ -89,13 +105,10 @@
   # Mining, and getting out of the way of streaming
   # ---------------------------------------------------------------------------
   rig.gamingGuard = {
-    enable = true;
     graceSeconds = 60;
   };
 
   rig.mining = {
-    enable = true;
-
     pool = {
       url = "pool.supportxmr.com:443";
 
@@ -143,7 +156,6 @@
 
 
   rig.power = {
-    enable = true;
     wakeOnLan = true;
     controlUser = "ha";
     allowReboot = true;
@@ -167,8 +179,6 @@
   };
 
   rig.mqtt = {
-    enable = false;  # needs a broker and /etc/mqtt/password
-
     # The Home Assistant box running the Mosquitto add-on. There is no default
     # for this on purpose: a rig aimed at the wrong address looks perfectly
     # healthy -- it mines, it answers its API -- while publishing where
