@@ -12,13 +12,14 @@ let
   disko = t: "${t.config.system.build.destroyFormatMount}/bin/disko-destroy-format-mount";
 
   rigInstall = pkgs.writeShellScriptBin "rig-install" (builtins.replaceStrings
-    [ "@system1@" "@disko1@" "@system2@" "@disko2@" "@flake@" ]
+    [ "@system1@" "@disko1@" "@system2@" "@disko2@" "@flake@" "@admin@" ]
     [
       "${targets.oneDisk.config.system.build.toplevel}"
       (disko targets.oneDisk)
       "${targets.twoDisks.config.system.build.toplevel}"
       (disko targets.twoDisks)
       "${flakeSource}"
+      targets.oneDisk.config.rig.admin.name
     ]
     (builtins.readFile ./rig-install.sh));
 in

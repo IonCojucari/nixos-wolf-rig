@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 #
 # Build the --extra-files tree for one rig: the XMRig API token, the MQTT
-# broker password, and an optional console password for `admin`.
+# broker password, and an optional console password for the administrator.
 #
-# Usage:  scripts/mk-secrets.sh <rig-name>
+# Usage:  scripts/mk-secrets.sh <rig-name> [admin-login]
+#
+# admin-login is the rig's rig.admin.name. Left out, it is read from the
+# flake (with the private folder, $RIG_PRIVATE or /etc/nixos-private, when
+# there is one). The password hash is written to etc/<admin-login>.passwd,
+# the one path the host reads.
 #
 # Writes secrets/<rig-name>/, which is gitignored and stays on this machine.
 # Hand it to nixos-anywhere with --extra-files; it is copied to the root of
@@ -17,7 +22,7 @@ set -euo pipefail
 
 RIG="${1:-}"
 if [ -z "$RIG" ]; then
-  echo "usage: $0 <rig-name>" >&2
+  echo "usage: $0 <rig-name> [admin-login]" >&2
   echo >&2
   echo "  e.g. $0 wolf-rig   (matches a nixosConfigurations entry)" >&2
   exit 1
@@ -25,6 +30,27 @@ fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIR="$ROOT/secrets/$RIG"
+
+ADMIN="${2:-}"
+if [ -z "$ADMIN" ]; then
+  private="${RIG_PRIVATE:-/etc/nixos-private}"
+  override=()
+  if [ -d "$private/.git" ]; then
+    override=(--override-input private "git+file://$private")
+  elif [ -d "$private" ]; then
+    override=(--override-input private "path:$private")
+  fi
+  if ! ADMIN="$(nix --extra-experimental-features 'nix-command flakes' eval --raw \
+        "$ROOT#nixosConfigurations.$RIG.config.rig.admin.name" "${override[@]}" 2>/dev/null)" \
+     || [ -z "$ADMIN" ]; then
+    echo "ERROR: could not read rig.admin.name of '$RIG' from the flake." >&2
+    echo "       Pass the login as the second argument: $0 $RIG <admin-login>" >&2
+    exit 1
+  fi
+fi
+case "$ADMIN" in
+  *[!a-z0-9_-]*|-*) echo "ERROR: '$ADMIN' is not a login name." >&2; exit 1 ;;
+esac
 
 if [ -e "$DIR" ]; then
   echo "ERROR: $DIR already exists." >&2
@@ -114,9 +140,9 @@ done
 unset mq1 mq2
 
 # --------------------------------------------------------------------------
-# Console password for `admin`.
+# Console password for the administrator.
 #
-# admin is in wheel with passwordless sudo, so this is a root password in
+# The account is in wheel with passwordless sudo, so this is a root password in
 # effect. Skipping it is a legitimate choice — it just means an SSH key is the
 # only way in, with no console fallback if the network does not come up.
 #
@@ -126,15 +152,15 @@ unset mq1 mq2
 # --------------------------------------------------------------------------
 echo
 echo "--------------------------------------------------------------"
-echo " Console password for 'admin' on $RIG"
+echo " Console password for '$ADMIN' on $RIG"
 echo
-echo " admin is in wheel with passwordless sudo. Leaving this empty"
+echo " $ADMIN is in wheel with passwordless sudo. Leaving this empty"
 echo " means SSH keys are the only way in, with no console fallback."
 echo "--------------------------------------------------------------"
 
 HASH='!'
 while true; do
-  read -rsp "Password for 'admin' (empty to skip): " pw1; echo
+  read -rsp "Password for '$ADMIN' (empty to skip): " pw1; echo
   if [ -z "$pw1" ]; then
     echo "  -> skipped; SSH key only."
     break
@@ -151,8 +177,8 @@ while true; do
 done
 unset pw1 pw2
 
-printf '%s\n' "$HASH" > "$DIR/etc/admin.passwd"
-chmod 600 "$DIR/etc/admin.passwd"
+printf '%s\n' "$HASH" > "$DIR/etc/$ADMIN.passwd"
+chmod 600 "$DIR/etc/$ADMIN.passwd"
 
 COMPLETE=1
 
@@ -161,7 +187,7 @@ cat <<EOF
 Wrote $DIR
   etc/xmrig/token       0600  XMRig API bearer token
   etc/mqtt/password     0600  $([ -n "$MQTT_SET" ] && echo "MQTT password for user 'miner'" || echo 'not written (rig will not announce itself)')
-  etc/admin.passwd        0600  $([ "$HASH" = '!' ] && echo 'locked (no console password)' || echo 'SHA-512 crypt hash')
+  etc/$ADMIN.passwd  0600  $([ "$HASH" = '!' ] && echo 'locked (no console password)' || echo 'SHA-512 crypt hash')
 
 Install with:
 

@@ -166,10 +166,9 @@
   # machine, so an unreachable result is not recoverable without a trip to it.
   # Fail the build instead of discovering that afterwards.
   assertions = [{
-    # The offline installer adds keys at install time through
-    # services.openssh.authorizedKeysFiles instead (installer/target.nix).
-    assertion = config.rig.admin.sshKeys != [ ]
-      || config.services.openssh.authorizedKeysFiles != [ ];
+    # The offline installer asks for a key or a console password at install
+    # time instead (installer/target.nix sets loginSetAtInstall).
+    assertion = config.rig.admin.sshKeys != [ ] || config.rig.admin.loginSetAtInstall;
     message = ''
       rig.admin.sshKeys is empty: the installed machine would be
       unreachable (key-only sshd, PermitRootLogin=no, no desktop, and no
