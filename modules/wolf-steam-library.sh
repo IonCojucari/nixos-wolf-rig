@@ -8,7 +8,8 @@
 #
 #  1. config.toml: every app named 'WolfSteam' gets
 #       <hostLibraryPath>:/home/retro/SteamLibrary:rw
-#     in its mounts.
+#     in its mounts. Checked app by app: a profile added after the first run
+#     has a WolfSteam app of its own, without the mount.
 #  2. Every existing profile's libraryfolders.vdf gets that in-container path
 #     registered as a library. A profile created later has no vdf yet; add the
 #     library once from Steam > Settings > Storage.
@@ -19,11 +20,13 @@ dest=/home/retro/SteamLibrary
 mount="$lib:$dest:rw"
 toml=$state/cfg/config.toml
 
-if [ -f "$toml" ] && ! grep -qF "'$mount'" "$toml"; then
+if [ -f "$toml" ]; then
   tmp=$(mktemp "$toml.XXXXXX")
   awk -v m="$mount" '
-    function flush(   i, out, done) {
+    function flush(   i, l, done) {
       if (n == 0) return
+      # An app that already has the mount is left as it is.
+      for (i = 1; i <= n; i++) if (index(buf[i], "\x27" m "\x27")) steam = 0
       if (steam) {
         for (i = 1; i <= n; i++) {
           l = buf[i]
@@ -43,9 +46,14 @@ if [ -f "$toml" ] && ! grep -qF "'$mount'" "$toml"; then
     { buf[++n] = $0 }
     /^[ \t]*name = \x27WolfSteam\x27/ { steam = 1 }
     END { flush() }
-  ' "$toml" > "$tmp" && chmod --reference="$toml" "$tmp" && mv "$tmp" "$toml" \
-    && echo "wolf-steam-library: mounted $lib into WolfSteam apps" \
-    || { rm -f "$tmp"; echo "wolf-steam-library: could not patch $toml"; }
+  ' "$toml" > "$tmp" || { rm -f "$tmp"; tmp=; echo "wolf-steam-library: could not patch $toml"; }
+  if [ -n "$tmp" ] && cmp -s "$tmp" "$toml"; then
+    rm -f "$tmp"   # every WolfSteam app has it already
+  elif [ -n "$tmp" ]; then
+    chmod --reference="$toml" "$tmp" && mv "$tmp" "$toml" \
+      && echo "wolf-steam-library: mounted $lib into WolfSteam apps" \
+      || { rm -f "$tmp"; echo "wolf-steam-library: could not patch $toml"; }
+  fi
 fi
 
 for vdf in "$state"/profile-data/*/WolfSteam/.steam/steam/steamapps/libraryfolders.vdf; do

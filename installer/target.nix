@@ -35,6 +35,7 @@
   # SSH keys (on top of any the host config has built in).
   rig.mining.pool.walletFile = "/etc/xmrig/wallet";
   services.openssh.authorizedKeysFiles = [ "/etc/ssh/local_authorized_keys/%u" ];
+  rig.admin.loginSetAtInstall = true;
 
   rig.disk.system = lib.mkForce "/dev/rig-system";
 

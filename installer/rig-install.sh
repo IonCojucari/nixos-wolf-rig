@@ -6,7 +6,7 @@
 # Interactive by default. For unattended installs (and the VM test) every
 # question can be answered from the environment:
 #   RIG_SYSTEM_DISK=/dev/nvme0n1  RIG_DATA_DISK=/dev/nvme1n1|none
-#   RIG_HOSTNAME=wolf-node  RIG_ADMIN_PASSWORD=...  RIG_MQTT_PASSWORD=...
+#   RIG_HOSTNAME=wolf-node  RIG_ADMIN_PASSWORD=...
 #   RIG_SSH_KEY="ssh-ed25519 ..."  RIG_WALLET=4...  (empty string = skip)
 #   RIG_YES=1  (skip the ERASE confirmation)
 #
@@ -14,9 +14,12 @@
 #   @system1@ @disko1@  single-disk system and its partitioning script
 #   @system2@ @disko2@  two-disk system and its partitioning script
 #   @flake@             this flake's source, copied to /etc/nixos
+#   @admin@             the administrator's login (rig.admin.name)
 set -euo pipefail
 
 [ "$(id -u)" = 0 ] || exec sudo -E "$0" "$@"
+
+admin=@admin@
 
 bold() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 die()  { printf '\n\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -126,19 +129,19 @@ fi
 [[ $host =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || die "hostname: lowercase letters, digits and dashes only."
 
 echo
-echo "Admin user 'admin'. Log in over SSH with a key, or at the screen with a"
+echo "Admin user '$admin'. Log in over SSH with a key, or at the screen with a"
 echo "password -- at least one of the two."
 if [ -n "${RIG_SSH_KEY+x}" ]; then
   ssh_key=$RIG_SSH_KEY
 else
   while true; do
-    read -rp "SSH public key for admin (paste one line, Enter to skip): " ssh_key
+    read -rp "SSH public key for $admin (paste one line, Enter to skip): " ssh_key
     [ -z "$ssh_key" ] && break
     [[ $ssh_key =~ ^(ssh-|ecdsa-|sk-) ]] && break
     echo "  That does not look like a public key (ssh-ed25519 AAAA... you@host)." >&2
   done
 fi
-admin_pw=${RIG_ADMIN_PASSWORD-$(ask_password "Console password for admin")}
+admin_pw=${RIG_ADMIN_PASSWORD-$(ask_password "Console password for $admin")}
 [ -n "$ssh_key" ] || [ -n "$admin_pw" ] || die "set an SSH key or a console password, or nobody can log in."
 
 echo
@@ -154,10 +157,6 @@ else
     echo "  Not a Monero address (95 or 106 characters, starting with 4 or 8)." >&2
   done
 fi
-
-echo
-echo "MQTT password for user 'miner' (lets the rig appear in Home Assistant)."
-mqtt_pw=${RIG_MQTT_PASSWORD-$(ask_password "MQTT password")}
 
 # --- confirm -----------------------------------------------------------------
 bold "3. Confirm"
@@ -193,23 +192,22 @@ ln -sfn "$(readlink -f "$sys")" /dev/rig-system
 
 bold "Secrets"
 umask 077
-install -d -m 755 /mnt/etc/xmrig /mnt/etc/mqtt
+install -d -m 755 /mnt/etc/xmrig
 openssl rand -hex 24 | tr -d '\n' > /mnt/etc/xmrig/token
-[ -n "$mqtt_pw" ] && printf '%s' "$mqtt_pw" > /mnt/etc/mqtt/password
+# The path the system reads: hashedPasswordFile in hosts/wolf-rig.
 if [ -n "$admin_pw" ]; then
-  printf '%s' "$admin_pw" | openssl passwd -6 -stdin > /mnt/etc/admin.passwd
+  printf '%s' "$admin_pw" | openssl passwd -6 -stdin > "/mnt/etc/$admin.passwd"
 else
-  echo '!' > /mnt/etc/admin.passwd
+  echo '!' > "/mnt/etc/$admin.passwd"
 fi
 [ -n "$wallet" ] && printf '%s\n' "$wallet" > /mnt/etc/xmrig/wallet
-chmod 600 /mnt/etc/xmrig/token /mnt/etc/admin.passwd
-[ -f /mnt/etc/mqtt/password ] && chmod 600 /mnt/etc/mqtt/password
+chmod 600 /mnt/etc/xmrig/token "/mnt/etc/$admin.passwd"
 umask 022
 if [ -n "$ssh_key" ]; then
   # sshd's StrictModes wants root-owned, not group/world-writable.
   install -d -m 755 /mnt/etc/ssh/local_authorized_keys
-  printf '%s\n' "$ssh_key" > /mnt/etc/ssh/local_authorized_keys/admin
-  chmod 644 /mnt/etc/ssh/local_authorized_keys/admin
+  printf '%s\n' "$ssh_key" > "/mnt/etc/ssh/local_authorized_keys/$admin"
+  chmod 644 "/mnt/etc/ssh/local_authorized_keys/$admin"
 fi
 echo "$host" > /mnt/etc/hostname
 
@@ -263,4 +261,7 @@ After the first boot (needs internet):
     http://<this machine's IP>:47989
   - Tailscale:  sudo tailscale up   (then sign the node: tailnet lock)
   - Full config incl. Whisper:  sudo nixos-rebuild switch --flake /etc/nixos#$host
+  - Home Assistant over MQTT is off in this image (the broker's address is
+    part of the configuration): set rig.mqtt.enable and rig.mqtt.broker,
+    put the broker password in /etc/mqtt/password (mode 600), rebuild.
 EOF

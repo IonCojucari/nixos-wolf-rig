@@ -127,8 +127,14 @@ in
         }
         for name in secret db otp ar-primary ar-deterministic ar-salt; do gen "$name"; done
         [ -e "$dir/jws" ] || openssl genrsa -out "$dir/jws" 2048 2>/dev/null
-        chown ${config.services.gitlab.user}:${config.services.gitlab.group} "$dir"/*
-        chmod 0400 "$dir"/*
+        # Only the files GitLab reads. Other things live in this directory
+        # too (the runner token of modules/gitlab-runner.nix, root-only by
+        # design), so no glob.
+        for name in secret db otp ar-primary ar-deterministic ar-salt jws root-password; do
+          [ -e "$dir/$name" ] || continue
+          chown ${config.services.gitlab.user}:${config.services.gitlab.group} "$dir/$name"
+          chmod 0400 "$dir/$name"
+        done
       '';
     };
   };

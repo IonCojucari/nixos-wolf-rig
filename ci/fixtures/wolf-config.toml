@@ -1,0 +1,41 @@
+# Shape of Wolf's cfg/config.toml as far as modules/wolf-steam-library.sh
+# reads it: two profiles, the first already patched, the second not.
+config_version = 6
+
+[[profiles]]
+id = 'first'
+
+    [[profiles.apps]]
+    title = 'Steam'
+
+        [profiles.apps.runner]
+        mounts = [ '/data/steam-library:/home/retro/SteamLibrary:rw' ]
+        name = 'WolfSteam'
+        type = 'docker'
+
+    [[profiles.apps]]
+    title = 'Firefox'
+
+        [profiles.apps.runner]
+        mounts = [  ]
+        name = 'WolfFirefox'
+        type = 'docker'
+
+[[profiles]]
+id = 'second'
+
+    [[profiles.apps]]
+    title = 'Steam'
+
+        [profiles.apps.runner]
+        mounts = [ '/some/dir:/home/retro/other:ro' ]
+        name = 'WolfSteam'
+        type = 'docker'
+
+    [[profiles.apps]]
+    title = 'Steam (no mounts)'
+
+        [profiles.apps.runner]
+        mounts = []
+        name = 'WolfSteam'
+        type = 'docker'

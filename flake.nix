@@ -52,42 +52,35 @@
         map (f: "${dir}/${f}") nixFiles
         ++ [{ rig = lib.mapAttrsRecursive (_: lib.mkOverride 90) (values.rig or { }); }];
 
+      # What every system built here is made of: the hosts and the installer
+      # targets below. One list, so a module a host file reads options from
+      # cannot be added to one and forgotten in the other.
+      rigModules = [
+        ./modules/mining.nix
+        ./modules/power.nix
+        ./modules/mqtt.nix
+        ./modules/wolf.nix
+        ./modules/tailscale.nix
+        ./modules/gaming-guard.nix
+        ./modules/admin.nix
+        disko.nixosModules.disko
+        ./modules/disko.nix
+      ];
+
       mkHost = name: lib.nixosSystem {
         inherit system;
-        modules = [
-          ./hosts/${name}
-          ./modules/mining.nix
-          ./modules/power.nix
-          ./modules/mqtt.nix
-          ./modules/wolf.nix
-          ./modules/tailscale.nix
-          ./modules/gaming-guard.nix
-          ./modules/whisper.nix
-          ./modules/admin.nix
-        ]
-        ++ privateModules name
-        ++ [
-          disko.nixosModules.disko
-          ./modules/disko.nix
-        ];
+        modules = [ ./hosts/${name} ./modules/whisper.nix ]
+          ++ rigModules
+          ++ privateModules name;
       };
 
       # The offline installer: one ISO with two prebuilt targets, picked by
       # rig-install from the disks the user chooses (installer/).
       mkTarget = data: lib.nixosSystem {
         inherit system;
-        modules = [
-          ./installer/target.nix
-          ./modules/mining.nix
-          ./modules/power.nix
-          ./modules/mqtt.nix
-          ./modules/wolf.nix
-          ./modules/tailscale.nix
-          ./modules/gaming-guard.nix
-          disko.nixosModules.disko
-          ./modules/disko.nix
-          { rig.disk.data = lib.mkForce data; }
-        ];
+        modules = [ ./installer/target.nix ]
+          ++ rigModules
+          ++ [{ rig.disk.data = lib.mkForce data; }];
       };
 
       installer = lib.nixosSystem {
