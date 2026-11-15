@@ -273,7 +273,7 @@ What they cover:
 
 - no secrets in the history or the working tree (gitleaks, plus Monero
   addresses and SSH public keys; `.gitleaks.toml`);
-- shellcheck on every script;
+- shellcheck on every script, actionlint on the GitHub workflows;
 - `modules/wolf-steam-library.sh` against a sample `config.toml`;
 - every host, the installer ISO and the tests evaluate, using the made-up
   settings in `ci/private`;

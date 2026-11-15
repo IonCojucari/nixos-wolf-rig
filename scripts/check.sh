@@ -57,6 +57,15 @@ else
   fail "shellcheck"
 fi
 
+# --- workflows ---------------------------------------------------------------
+step "GitHub workflows are valid (actionlint)"
+# A workflow GitHub cannot parse does not fail: it does not run at all.
+if nix shell --inputs-from . nixpkgs#actionlint -c actionlint .github/workflows/*.yml; then
+  echo "ok  $(ls .github/workflows/*.yml | wc -l) workflows"
+else
+  fail "actionlint"
+fi
+
 # --- secrets -----------------------------------------------------------------
 step "No secrets in the history or the working tree (gitleaks)"
 # .gitleaks.toml: gitleaks' own rules plus Monero addresses and SSH public
