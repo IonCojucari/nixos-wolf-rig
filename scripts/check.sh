@@ -114,6 +114,49 @@ cmp -s "$tmp/once" "$state/cfg/config.toml" || fail "wolf-steam-library: second 
 [ "$(ls "$state/cfg" | wc -l)" = 1 ] || fail "wolf-steam-library: left a temporary file behind"
 echo "done"
 
+# --- wolf-gpu-profiles -------------------------------------------------------
+step "wolf-gpu-profiles hands out GPUs per profile and takes them back"
+state=$tmp/wolf-gpus
+mkdir -p "$state/cfg"
+cp ci/fixtures/wolf-config-gpus.toml "$state/cfg/config.toml"
+A=/dev/dri/by-path/pci-0000:03:00.0-render B=/dev/dri/by-path/pci-0000:07:00.0-render C=/dev/dri/by-path/pci-0000:0a:00.0-render
+gp() { bash modules/wolf-gpu-profiles.sh "$state" "$@" > /dev/null 2>&1; }
+# The render_node lines of one profile's apps, in order: "-" for none.
+nodes() { # $1 profile id
+  awk -v want="$1" '
+    /^[ \t]*\[\[profiles\]\]/ { if (app) print node; app = 0; head = 1; id = ""; next }
+    /^[ \t]*\[\[profiles\.apps\]\]/ { if (app) print node; app = (id == want); node = "-"; head = 0; inapp = 1; next }
+    /^[ \t]*\[/ { head = 0; inapp = 0 }
+    head && /^[ \t]*id = / { id = $3; gsub(/[\x27"]/, "", id) }
+    app && inapp && /render_node = / { node = $3; gsub(/\x27/, "", node) }
+    END { if (app) print node }
+  ' "$state/cfg/config.toml" | paste -sd' '
+}
+expect() { # $1 label, $2 profile, $3 expected nodes
+  local got; got=$(nodes "$2")
+  [ "$got" = "$3" ] || fail "wolf-gpu-profiles: $1: profile $2 has '$got', expected '$3'"
+}
+gp "$A,$B"
+expect "rotation" moonlight-profile-id "-"
+expect "rotation" first "$A $A"
+expect "rotation" second "$B"
+expect "rotation, set by hand" third "/dev/dri/by-path/pci-0000:99:00.0-render $A"
+cp "$state/cfg/config.toml" "$tmp/once"
+gp "$A,$B"
+cmp -s "$tmp/once" "$state/cfg/config.toml" || fail "wolf-gpu-profiles: second run changed the file"
+gp "$B,$A"
+expect "new order" first "$B $B"
+expect "new order" second "$A"
+gp "$A,$B" "second=$C"
+expect "fixed" second "$C"
+expect "fixed" first "$A $A"
+expect "fixed, rotation skips it" third "/dev/dri/by-path/pci-0000:99:00.0-render $B"
+gp ""
+cmp -s ci/fixtures/wolf-config-gpus.toml "$state/cfg/config.toml" \
+  || { diff ci/fixtures/wolf-config-gpus.toml "$state/cfg/config.toml"; fail "wolf-gpu-profiles: off did not restore the file"; }
+[ "$(ls -A "$state/cfg" | wc -l)" = 1 ] || fail "wolf-gpu-profiles: left files behind: $(ls -A "$state/cfg")"
+echo "done"
+
 # --- systems -----------------------------------------------------------------
 step "Hosts evaluate (with ci/private)"
 hosts=()

@@ -2,15 +2,17 @@
 # Works out the host-specific values Wolf needs, so a host config can say
 # "auto" instead of hardcoding PCI paths, interface names and core lists.
 #
-# Usage: wolf-hw-detect.sh <render> <encoder> <ip> <reserved-cores>
+# Usage: wolf-hw-detect.sh <render> <encoder> <ip> <reserved-cores> [<profile-gpus>]
 #   render   "auto" | /dev/dri/... path
 #   encoder  "none" | "secondary" | /dev/dri/... path
 #   ip       "auto" | an address | "none"
 #   reserved number of physical cores to keep free of games (0 = none)
+#   profile-gpus "none" (default) | "auto" | comma-separated /dev/dri/...
+#            paths: the GPUs rig.wolf.gpuPerProfile hands out to profiles
 # Prints KEY=VALUE lines (an env file) on stdout, a summary on stderr.
 set -u
 
-want_render=$1 want_encoder=$2 want_ip=$3 reserved=$4
+want_render=$1 want_encoder=$2 want_ip=$3 reserved=$4 want_profile_gpus=${5:-none}
 
 log() { echo "wolf-hw-detect: $*" >&2; }
 
@@ -89,6 +91,33 @@ fi
 enc_node=${encoder:-$render}
 enc_vendor=$(awk -v n="$enc_node" '$4 == n {print $2}' <<<"$gpus")
 echo "RIG_ENCODER_VENDOR=${enc_vendor:-unknown}"
+
+# --- GPUs per profile (rig.wolf.gpuPerProfile) -----------------------------
+# "auto": every discrete AMD card (over 2 GiB of VRAM), the render GPU first,
+# then the others by rank. Fewer than two leaves the list empty: with one
+# card there is nothing to spread, and an empty list also takes back any
+# render_node an earlier boot wrote.
+profile_gpus=""
+case "$want_profile_gpus" in
+  none) ;;
+  auto)
+    list=$(
+      awk -v r="$render" '$4 == r && $2 == "0x1002" && $1 > 2147483648 {print $4}' <<<"$gpus"
+      awk -v r="$render" '$4 != r && $2 == "0x1002" && $1 > 2147483648 {print $4}' <<<"$gpus"
+    )
+    if [ "$(grep -c . <<<"$list")" -ge 2 ]; then
+      profile_gpus=$(paste -sd, <<<"$list")
+    else
+      log "gpu per profile: fewer than two discrete AMD GPUs, every profile stays on $render"
+    fi ;;
+  *)
+    for n in ${want_profile_gpus//,/ }; do
+      [ -e "$n" ] || log "WARNING: gpu per profile: $n does not exist"
+    done
+    profile_gpus=$want_profile_gpus ;;
+esac
+echo "RIG_PROFILE_GPUS=$profile_gpus"
+if [ -n "$profile_gpus" ]; then log "gpu per profile: $profile_gpus"; fi
 
 # --- Network --------------------------------------------------------------
 # network-online.target does not mean "DHCP has a lease" on every setup (on

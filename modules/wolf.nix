@@ -7,6 +7,8 @@ let
 
   steamLibraryScript = pkgs.writeShellScript "wolf-steam-library" (builtins.readFile ./wolf-steam-library.sh);
 
+  gpuProfilesScript = pkgs.writeShellScript "wolf-gpu-profiles" (builtins.readFile ./wolf-gpu-profiles.sh);
+
   # Interfaces with a fixed name get their own unit; "lan" is resolved at
   # boot by wolf-hw-detect.
   namedPacingInterfaces = lib.filter (d: d != "lan") cfg.videoPacing.interfaces;
@@ -155,6 +157,85 @@ in
         queue with the game and, with no preemption, waits behind it. Check
         the encoder GPU's codecs (an AMD iGPU of the RDNA2 era has no AV1)
         and speed (it caps the frame rate at high resolutions).
+      '';
+    };
+
+    gpuPerProfile = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Put each Wolf profile -- each player -- on a GPU of its own, on a
+          box with more than one discrete AMD card. Experimental: written
+          from Wolf's source (stable, 2026-11), not yet run on real
+          multi-GPU hardware.
+
+          Wolf reads a `render_node` per app in cfg/config.toml (not in its
+          current docs). wolf-gpu-profiles sets it on every app of every
+          profile except the Moonlight one, handing out `gpus` in turn in
+          the order the profiles appear: with three cards and three
+          players, one card each; a fourth player shares the first card. It
+          runs before every Wolf start, like wolf-steam-library, so a
+          profile created while Wolf runs gets its GPU the next time Wolf
+          starts. Turning the option off takes those settings back out.
+
+          What moves to the player's GPU: the Wayland compositor of the
+          player's session (the Wolf UI lobby) and the game container,
+          which is only given that GPU's /dev/dri nodes.
+
+          What does not: the video encode. Every stream is encoded by the
+          Moonlight session's pipeline, which belongs to the app the client
+          started in Moonlight (Wolf UI), on Wolf's default GPU
+          (renderNode). Each frame is copied from the player's GPU to that
+          one, over PCIe. The default GPU therefore runs one encode per
+          player; a current AMD card's encoder handles several 1440p60
+          streams, but it is the shared resource here.
+
+          Zero-copy: the copy above hands DMA-BUFs from one card to the
+          other, in a format and memory layout chosen for the default GPU.
+          Cards of the same generation share those layouts; different
+          generations may not, and the session then fails to start
+          ("not-negotiated" in Wolf's log). Set zeroCopy = false if it
+          does.
+        '';
+      };
+
+      gpus = lib.mkOption {
+        type = lib.types.either (lib.types.enum [ "auto" ]) (lib.types.listOf lib.types.str);
+        default = "auto";
+        example = [ "/dev/dri/by-path/pci-0000:03:00.0-render" "/dev/dri/by-path/pci-0000:07:00.0-render" ];
+        description = ''
+          The GPUs handed out to profiles, in order. "auto" resolves them at
+          every boot (wolf-hw-detect): every discrete AMD card (more than
+          2 GiB of VRAM), the render GPU first. With fewer than two found,
+          nothing is assigned. A list pins them; use PCI paths, never
+          renderD* (see renderNode).
+        '';
+      };
+
+      assign = lib.mkOption {
+        type = lib.types.attrsOf lib.types.str;
+        default = { };
+        example = { alice = "/dev/dri/by-path/pci-0000:07:00.0-render"; };
+        description = ''
+          A fixed GPU for particular profiles, by Wolf profile id (the `id`
+          of the [[profiles]] entry in cfg/config.toml). These are left out
+          of the rotation over `gpus`. Profile ids are names you chose, so
+          set this in the private rig.toml.
+        '';
+      };
+    };
+
+    zeroCopy = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Wolf's zero-copy video path: frames stay in GPU memory from the
+        compositor to the encoder. false sets WOLF_USE_ZERO_COPY=FALSE
+        (read by Wolf, not in its docs), so every frame goes through system
+        memory instead: more CPU and memory bandwidth, but no format or
+        memory layout has to match between GPUs. The fallback for
+        gpuPerProfile with cards of different generations.
       '';
     };
 
@@ -637,6 +718,8 @@ in
         WOLF_LOG_LEVEL = "INFO";
         XDG_RUNTIME_DIR = "/run/user/wolf";
         HOST_APPS_STATE_FOLDER = cfg.stateDir;
+      } // lib.optionalAttrs (!cfg.zeroCopy) {
+        WOLF_USE_ZERO_COPY = "FALSE";
       };
       # WOLF_RENDER_NODE, WOLF_ENCODER_NODE and WOLF_INTERNAL_IP, resolved
       # for this machine at boot by wolf-hw-detect (explicit values pass
@@ -763,6 +846,9 @@ in
             (if cfg.encoderNode == null then "none" else cfg.encoderNode)
             (if cfg.internalIp == null then "none" else cfg.internalIp)
             (toString (if cfg.cpuPriority.enable && cfg.cpuPriority.gameCpus == "auto" then cfg.cpuPriority.reservedCores else 0))
+            (if !cfg.gpuPerProfile.enable then "none"
+             else if cfg.gpuPerProfile.gpus == "auto" then "auto"
+             else lib.concatStringsSep "," cfg.gpuPerProfile.gpus)
           ]} > /run/wolf/hw.env.new
           mv /run/wolf/hw.env.new /run/wolf/hw.env
           . /run/wolf/hw.env
@@ -857,7 +943,7 @@ in
       # that has to run before it: the blocks here are joined with //, which
       # replaces a whole unit instead of merging its lists.
       docker-wolf = rec {
-        wants = [ "wolf-hw-detect.service" "wolf-config.service" "wolf-av1-padstrip.service" ]
+        wants = [ "wolf-hw-detect.service" "wolf-config.service" "wolf-av1-padstrip.service" "wolf-gpu-profiles.service" ]
           ++ lib.optional (cfg.sharedSteamLibrary != null) "wolf-steam-library.service";
         after = wants;
       };
@@ -921,6 +1007,31 @@ in
             fi
           fi
           true
+        '';
+      };
+    }
+    // {
+      # See gpuPerProfile. Always present, so that turning the option off
+      # also takes its render_node settings back out of config.toml. Patches
+      # config.toml, so tied to Wolf's own starts like wolf-config above,
+      # and runs after the other patchers: each rewrites the whole file.
+      wolf-gpu-profiles = {
+        description = "Give each Wolf profile its own GPU";
+        wantedBy = [ "multi-user.target" ];
+        before = [ "docker-wolf.service" ];
+        after = [ "wolf-hw-detect.service" "wolf-config.service" "wolf-av1-padstrip.service" "wolf-steam-library.service" ];
+        partOf = [ "docker-wolf.service" ];
+        restartIfChanged = false;
+        stopIfChanged = false;
+        path = [ pkgs.gawk pkgs.coreutils pkgs.diffutils ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+        };
+        script = ''
+          [ -r /run/wolf/hw.env ] && . /run/wolf/hw.env
+          ${gpuProfilesScript} ${lib.escapeShellArg cfg.stateDir} "''${RIG_PROFILE_GPUS:-}" ${
+            lib.escapeShellArgs (lib.mapAttrsToList (id: gpu: "${id}=${gpu}") cfg.gpuPerProfile.assign)}
         '';
       };
     }

@@ -219,7 +219,7 @@ Detected at every boot, so a new machine needs none of them set:
 
 | Option | Default | Resolves to |
 |---|---|---|
-| `renderNode` | `"auto"` | the AMD GPU with the most VRAM, else NVIDIA, else Intel |
+| `renderNode` | `"auto"` | the AMD GPU with the most VRAM, else Intel (NVIDIA last: no driver here) |
 | `encoderNode` | `"secondary"` | a second, lower-ranked GPU such as the iGPU; none: the render GPU |
 | `internalIp` | `"auto"` | source address of the default route |
 | `videoPacing.interfaces` | `[ "lan" "tailscale0" ]` | the default-route interface, plus the tailnet |
@@ -245,6 +245,15 @@ someone is playing.
 Two discrete GPUs: detection logs a warning; pin `renderNode` to a
 `/dev/dri/by-path/pci-...-render` path. NVIDIA is not set up by this flake
 (it needs the proprietary driver on the host and inside Wolf's container).
+
+Several discrete AMD GPUs, one per player (experimental, not yet tried on
+real hardware): `gpuPerProfile.enable = true` gives each Wolf profile's
+games and desktop a GPU of its own, handed out in turn (`gpus = "auto"`:
+every discrete AMD card), or a fixed one per profile id with
+`gpuPerProfile.assign`. The video is still encoded on `renderNode`, so
+frames cross from the player's card to that one. If a session on a second
+card does not start ("not-negotiated" in `journalctl -u docker-wolf`), set
+`zeroCopy = false`. Details in `modules/wolf.nix`.
 
 ## Adding a machine
 

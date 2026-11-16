@@ -83,6 +83,12 @@ lib.mapAttrs mkTest {
       rig.wolf = {
         fecPercentage = 35;
         sharedSteamLibrary = "/data/steam-library";
+        # Paths that do not exist: wolf-hw-detect passes a pinned list
+        # through (with a warning), which is all this needs.
+        gpuPerProfile = {
+          enable = true;
+          gpus = [ "/dev/dri/by-path/test-a-render" "/dev/dri/by-path/test-b-render" ];
+        };
       };
       # A render node for wolf-hw-detect to find.
       virtualisation.qemu.options = [ "-device virtio-gpu-pci" ];
@@ -109,10 +115,16 @@ lib.mapAttrs mkTest {
               f"test $(grep -cF \"'/data/steam-library:/home/retro/SteamLibrary:rw'\" {toml}) = 3",
               timeout=60,
           )
+          # Two profiles, two apps each: one GPU per profile.
+          for gpu in ["a", "b"]:
+              machine.wait_until_succeeds(
+                  f"test $(grep -cF \"render_node = '/dev/dri/by-path/test-{gpu}-render'\" {toml}) = 2",
+                  timeout=60,
+              )
 
       with subtest("docker-wolf pulls its preparation units in"):
           wants = machine.succeed("systemctl show -p Wants --value docker-wolf.service")
-          for unit in ["wolf-hw-detect", "wolf-config", "wolf-av1-padstrip", "wolf-steam-library"]:
+          for unit in ["wolf-hw-detect", "wolf-config", "wolf-av1-padstrip", "wolf-steam-library", "wolf-gpu-profiles"]:
               assert f"{unit}.service" in wants, wants
               part_of = machine.succeed(f"systemctl show -p PartOf --value {unit}.service")
               assert (unit == "wolf-hw-detect") != ("docker-wolf.service" in part_of), (unit, part_of)

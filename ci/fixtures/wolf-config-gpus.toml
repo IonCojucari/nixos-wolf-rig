@@ -1,0 +1,65 @@
+# Shape of Wolf's cfg/config.toml as far as modules/wolf-gpu-profiles.sh
+# reads it: the Moonlight profile, which is never touched, and three player
+# profiles, one of them with a render_node set by hand on one app.
+config_version = 7
+
+[[profiles]]
+id = 'moonlight-profile-id'
+
+    [[profiles.apps]]
+    title = 'Wolf UI'
+
+        [profiles.apps.runner]
+        name = 'Wolf-UI'
+        type = 'docker'
+
+[[profiles]]
+id = 'first'
+name = 'First'
+
+    [[profiles.apps]]
+    title = 'Steam'
+
+        [profiles.apps.runner]
+        name = 'WolfSteam'
+        type = 'docker'
+
+    [[profiles.apps]]
+    title = 'Firefox'
+
+        [profiles.apps.runner]
+        name = 'WolfFirefox'
+        type = 'docker'
+
+[[profiles]]
+id = "second"
+
+    [[profiles.apps]]
+    title = 'Steam'
+
+        [profiles.apps.runner]
+        name = 'WolfSteam'
+        type = 'docker'
+
+[[profiles]]
+id = 'third'
+
+    [[profiles.apps]]
+    title = 'Steam'
+    render_node = '/dev/dri/by-path/pci-0000:99:00.0-render'
+
+        [profiles.apps.runner]
+        name = 'WolfSteam'
+        type = 'docker'
+
+    [[profiles.apps]]
+    title = 'Lutris'
+
+        [profiles.apps.runner]
+        name = 'WolfLutris'
+        type = 'docker'
+
+[gstreamer.video]
+default_sink = '''
+rtpmoonlightpay_video name=moonlight_pay
+'''
