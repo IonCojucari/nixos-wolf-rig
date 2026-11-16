@@ -31,8 +31,11 @@ done
 
 # One line per render node: score vendor pci by-path-node. Score ranks how
 # suitable a GPU is to render games on: an AMD card by its VRAM (an APU's
-# carve-out is small, a discrete card's is GiBs), NVIDIA as discrete,
-# Intel as integrated. Highest score renders.
+# carve-out is small, a discrete card's is GiBs), Intel as integrated.
+# Highest score renders. NVIDIA ranks last: this configuration installs no
+# NVIDIA driver or container toolkit, so such a card runs on nouveau, which
+# has no hardware encoder; picking it would leave the stream with nothing to
+# encode on.
 gpus=$(
   for r in /sys/class/drm/renderD*; do
     [ -e "$r/device" ] || continue
@@ -42,7 +45,8 @@ gpus=$(
     [ -e "$node" ] || node="/dev/dri/$(basename "$r")"
     case "$vendor" in
       0x1002) score=$(cat "$dev/mem_info_vram_total" 2>/dev/null || echo 1) ;;
-      0x10de) score=1000000000000 ;;
+      0x10de) score=0
+              log "WARNING: NVIDIA GPU $pci is unsupported here (no NVIDIA driver); used only if nothing else is present" ;;
       0x8086) score=1 ;;
       *)      score=0 ;;
     esac
@@ -71,8 +75,9 @@ case "$want_encoder" in
   secondary)
     # Lowest-ranked GPU that is not the render GPU: on a box with a dGPU and
     # an iGPU that is the iGPU, which keeps the encode off the GPU the game
-    # saturates. Nothing else present -> encode on the render GPU.
-    encoder=$(awk -v r="$render" '$4 != r {n=$4} END{print n}' <<<"$gpus") ;;
+    # saturates. Nothing else present -> encode on the render GPU. NVIDIA is
+    # skipped: without its driver it has no encoder (see the ranking above).
+    encoder=$(awk -v r="$render" '$4 != r && $2 != "0x10de" {n=$4} END{print n}' <<<"$gpus") ;;
   *) encoder=$want_encoder ;;
 esac
 if [ -n "$encoder" ]; then
