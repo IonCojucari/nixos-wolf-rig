@@ -7,7 +7,8 @@
 # The VMs have no network, no GPU and 1-4 GiB of RAM, which decides what each
 # test can claim:
 #   - streaming does not start Wolf itself (its image is pulled from the
-#     network); it tests everything around it;
+#     network); it tests everything around it. Wolf running and streaming
+#     to a client is tests/stream.nix;
 #   - whisper has no test: enabling it puts a 3 GB model in the closure;
 #   - the interplay of mining and streaming is modules/gaming-guard-test.nix.
 { pkgs, lib, rigModules }:
