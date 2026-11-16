@@ -292,12 +292,16 @@ The VM tests boot the system in QEMU and check that it works:
 | `moduleTest-mqtt` | the rig announces itself on a broker in the VM |
 | `moduleTest-tailscale`, `-tcpBbr`, `-gitlabRunner`, `-gitlab` | the daemon, the sysctl, the skipped runner, the generated secrets |
 | `gamingGuardTest` | mining stops for a session and comes back, also with Docker frozen |
+| `streamTest` | a stream from end to end: Wolf in one VM, a Moonlight client in a second one that pairs and has the picture on its screen, first a test pattern, then the Wolf menu |
 | `installerTest-streaming`, `-mining`, `-both` | the USB installer: `rig-install` partitions empty disks and installs offline, then the machine boots from them |
 | `installTest-<host>` | the same for the nixos-anywhere path (not run by CI) |
 
 Run one with `nix build .#moduleTest-mining -L`. A VM has no network and no
-real GPU, so Wolf itself and Whisper are not started in any of them, and the
-installer tests do not boot the ISO image itself.
+real GPU, so Whisper is not started in any of them, and the installer tests
+do not boot the ISO image itself. `streamTest` does run Wolf and its menu, from images
+pinned in `tests/stream.nix`, with software rendering and encoding;
+`result/stream.png` and `result/menu.png` are the client's screen, and CI
+keeps them as an artifact.
 
 CI runs `scripts/check.sh` on GitHub (`.github/workflows/check.yml`, which
 also runs every VM test as its own job) and on GitLab (`.gitlab-ci.yml`,

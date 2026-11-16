@@ -108,6 +108,9 @@
 
       moduleTests = import ./tests/modules.nix { inherit pkgs lib rigModules; };
 
+      # Wolf streaming to a Moonlight client in a second VM:  nix build .#streamTest -L
+      streamTest = import ./tests/stream.nix { inherit pkgs lib rigModules; };
+
       # The USB installer run for real, per role:  nix build .#installerTest-<role> -L
       installerTests = import ./tests/installer.nix {
         inherit pkgs lib;
@@ -219,6 +222,7 @@
         // lib.mapAttrs' (name: lib.nameValuePair "moduleTest-${name}") moduleTests
         // lib.mapAttrs' (name: lib.nameValuePair "installerTest-${name}") installerTests
         // {
+        inherit streamTest;
         # The name this flake used before it had more than one host.
         installTest = mkInstallTest "wolf-rig";
 

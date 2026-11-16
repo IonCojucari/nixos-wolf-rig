@@ -169,7 +169,7 @@ drv "packages.$system.installerIso"
 drv "packages.$system.installerSystems"
 drv "packages.$system.gamingGuardTest"
 vm_tests=$(nix eval --raw ".#packages.$system" --apply \
-  'p: builtins.concatStringsSep " " (builtins.filter (n: builtins.match "(moduleTest|installerTest)-.*" n != null) (builtins.attrNames p))' 2> "$tmp/err") \
+  'p: builtins.concatStringsSep " " (builtins.filter (n: builtins.match "(moduleTest|installerTest)-.*|streamTest" n != null) (builtins.attrNames p))' 2> "$tmp/err") \
   || { tail -20 "$tmp/err"; fail "list the VM tests"; }
 for t in $vm_tests; do
   drv "packages.$system.$t"
