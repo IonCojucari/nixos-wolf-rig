@@ -122,7 +122,8 @@ in
         encodes on, unless encoderNode says otherwise).
 
         "auto" (the default) picks it at every boot (wolf-hw-detect.service):
-        the AMD GPU with the most VRAM, else an NVIDIA GPU, else Intel. An
+        the AMD GPU with the most VRAM, else Intel, else (with a warning,
+        since no NVIDIA driver is installed here) an NVIDIA GPU. An
         APU's carve-out is a few hundred MiB, a discrete card's is GiBs, so
         on a box with both this is the discrete card regardless of PCI probe
         order. It is never /dev/dri/renderD128 as such: which GPU gets that
