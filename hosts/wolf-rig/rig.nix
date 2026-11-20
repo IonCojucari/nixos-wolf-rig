@@ -68,7 +68,8 @@
     # 2-3 ms bursts loses more of a frame than 20 % can rebuild, and each
     # such frame costs an IDR. 35 was picked by feel on 2026-11-14 after
     # trying 20, 25, 30, 40 and 60 in real games. null leaves Wolf at 20.
-    fecPercentage = 35;
+    # Raised to 45 on 2026-11-20 at the user's request.
+    fecPercentage = 45;
 
     # "vbr" was tried for both codecs on 2026-11-14 to stop CBR padding. On
     # game content the AMD encoder overshot badly (67-105 Mbit/s for a
