@@ -22,6 +22,9 @@
     tcpBbr = false;
   };
 
+  # The transcribe command as a web page, for files from a phone (port 8091).
+  rig.whisper.web.enable = true;
+
   # ---------------------------------------------------------------------------
   # Streaming
   # ---------------------------------------------------------------------------

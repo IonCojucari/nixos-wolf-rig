@@ -17,7 +17,12 @@
 #
 # Usage:  transcribe lectie.mp4 [limba]     (default language: ro)
 # Env:    WHISPER_CONTEXT=N (default 128, 0 = off), WHISPER_VAD=0 (disable VAD)
+#         WHISPER_START=S WHISPER_LENGTH=S (seconds: only that part of the input;
+#         the timestamps then start at 0), WHISPER_OUT=prefix (default: input
+#         name without its extension)
 # Writes lectie.txt, lectie.srt and lectie.vtt next to the input.
+# Web:    rig.whisper.web.enable = true serves the same command as a page on
+#         port 8091 (LAN and tailnet only) for sending files from a phone.
 let
   model = pkgs.fetchurl {
     name = "ggml-large-v3.bin";
@@ -44,7 +49,7 @@ let
       fi
       in="$1"
       lang="''${2:-ro}"
-      out="''${in%.*}"
+      out="''${WHISPER_OUT:-''${in%.*}}"
       wav="$(mktemp --suffix=.wav)"
       trap 'rm -f "$wav"' EXIT
 
@@ -53,8 +58,12 @@ let
       export GGML_VK_VISIBLE_DEVICES="''${GGML_VK_VISIBLE_DEVICES:-1}"
 
       # whisper.cpp only accepts 16 kHz mono PCM.
+      range=()
+      if [ -n "''${WHISPER_START:-}" ]; then
+        range=(-ss "$WHISPER_START" -t "''${WHISPER_LENGTH:?WHISPER_LENGTH goes with WHISPER_START}")
+      fi
       ffmpeg -nostdin -hide_banner -loglevel error -y \
-        -i "$in" -vn -ar 16000 -ac 1 -c:a pcm_s16le "$wav"
+        -i "$in" "''${range[@]}" -vn -ar 16000 -ac 1 -c:a pcm_s16le "$wav"
 
       # Prime each 30 s window with only ~three sentences of the previous
       # transcript instead of the default 224 tokens. With full priming a
@@ -81,15 +90,90 @@ let
       echo "Done: $out.txt  $out.srt  $out.vtt"
     '';
   };
+
+  # The same command behind a web page (whisper-web/), for sending a
+  # recording from a phone: upload, a queue of one, then copy or download
+  # the transcript. Rust rather than a script, so a multi-GB video upload is
+  # streamed to disk instead of passing through memory.
+  whisperWeb = pkgs.rustPlatform.buildRustPackage {
+    pname = "whisper-web";
+    version = "0.1.0";
+    src = ./whisper-web;
+    cargoLock.lockFile = ./whisper-web/Cargo.lock;
+    meta.mainProgram = "whisper-web";
+  };
+
+  cfg = config.rig.whisper;
 in
 {
-  options.rig.whisper.enable = lib.mkEnableOption "speech-to-text with whisper.cpp (the `transcribe` command)";
+  imports = [ ./lan.nix ];
 
-  config = lib.mkIf config.rig.whisper.enable {
-    environment.systemPackages = [
-      transcribe
-      pkgs.whisper-cpp-vulkan
-      pkgs.ffmpeg-headless
-    ];
+  options.rig.whisper = {
+    enable = lib.mkEnableOption "speech-to-text with whisper.cpp (the `transcribe` command)";
+
+    web = {
+      enable = lib.mkEnableOption ''
+        a web page for `transcribe` (upload a file, download the transcript),
+        open to rig.lanCidrs and the tailnet only. There is no login: anyone
+        who can reach the port can use it'';
+
+      port = lib.mkOption {
+        type = lib.types.port;
+        default = 8091;
+        description = "Port of the transcription web page.";
+      };
+
+      keepDays = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 7;
+        description = "Finished transcriptions are deleted after this many days; 0 keeps them.";
+      };
+    };
   };
+
+  config = lib.mkIf cfg.enable (lib.mkMerge [
+    {
+      environment.systemPackages = [
+        transcribe
+        pkgs.whisper-cpp-vulkan
+        pkgs.ffmpeg-headless
+      ];
+    }
+
+    (lib.mkIf cfg.web.enable {
+      systemd.services.whisper-web = {
+        description = "Web page for the transcribe command";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "network.target" ];
+        environment = {
+          LISTEN = "[::]:${toString cfg.web.port}";
+          TRANSCRIBE = lib.getExe transcribe;
+          KEEP_DAYS = toString cfg.web.keepDays;
+          # Mesa keeps its Vulkan shader cache here.
+          HOME = "/var/lib/whisper-web";
+          XDG_CACHE_HOME = "/var/lib/whisper-web/cache";
+        };
+        serviceConfig = {
+          ExecStart = lib.getExe whisperWeb;
+          DynamicUser = true;
+          StateDirectory = "whisper-web";
+          # The GPU: /dev/dri/renderD* belongs to `render`.
+          SupplementaryGroups = [ "render" "video" ];
+          Restart = "on-failure";
+          PrivateTmp = true;
+          ProtectSystem = "strict";
+          ProtectHome = true;
+          NoNewPrivileges = true;
+          # Whisper is the GPU's background work; a game stream comes first.
+          Nice = 10;
+        };
+      };
+
+      networking.firewall.interfaces.tailscale0.allowedTCPPorts = [ cfg.web.port ];
+      networking.firewall.extraInputRules =
+        lib.optionalString (config.rig.lanCidrs != [ ]) ''
+          ip saddr { ${lib.concatStringsSep ", " config.rig.lanCidrs} } tcp dport ${toString cfg.web.port} accept
+        '';
+    })
+  ]);
 }

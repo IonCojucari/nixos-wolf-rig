@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#2563eb">
+<title>Transcriere</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--fg:#1b1f24;--mut:#69727d;--line:#e2e5e9;--acc:#2563eb;--ok:#15803d;--bad:#b91c1c;--warn:#b45309}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#181b21;--fg:#e6e8eb;--mut:#9aa3ad;--line:#2a2f37;--acc:#5b8cff;--ok:#4ade80;--bad:#f87171;--warn:#fbbf24}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:760px;margin:0 auto;padding:20px 16px 64px}
+h1{font-size:1.35rem;margin:0 0 14px}
+.row{display:flex;gap:10px;align-items:center;margin:0 0 12px;flex-wrap:wrap}
+.drop{display:block;border:2px dashed var(--line);border-radius:14px;padding:30px 16px;text-align:center;background:var(--card);cursor:pointer;margin-bottom:22px;transition:border-color .15s}
+.drop:hover,.drop.over{border-color:var(--acc)}
+.drop b{display:block;font-size:1.1rem;margin-bottom:4px}
+.drop span{color:var(--mut);font-size:.9rem}
+select,button,.btn{font:inherit;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--fg);padding:8px 12px;text-decoration:none;cursor:pointer;display:inline-block}
+button:hover,.btn:hover{border-color:var(--acc)}
+.pri{background:var(--acc)!important;border-color:var(--acc)!important;color:#fff!important}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}
+.top{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
+.name{font-weight:600;word-break:break-word}
+.badge{font-size:.8rem;padding:2px 9px;border-radius:99px;border:1px solid currentColor;white-space:nowrap}
+.queued{color:var(--mut)}.running,.up,.wait{color:var(--acc)}.done{color:var(--ok)}.failed,.err{color:var(--bad)}
+.meta{color:var(--mut);font-size:.85rem;margin-top:2px}
+.bar{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin:10px 0 2px}
+.bar i{display:block;height:100%;background:var(--acc);transition:width .4s}
+.prev{font-size:.92rem;color:var(--mut);margin-top:8px;font-style:italic}
+.log{font:12px/1.4 ui-monospace,monospace;color:var(--bad);white-space:pre-wrap;max-height:170px;overflow:auto;margin-top:8px}
+.acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.acts .btn,.acts button{padding:6px 11px;font-size:.9rem}
+.acts .del{margin-left:auto;color:var(--mut)}
+.empty{color:var(--mut);text-align:center;padding:24px}
+.qbar{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin:4px 0 12px;color:var(--mut);font-size:.92rem}
+.qbar.off{color:var(--warn)}
+.paused{color:var(--warn)}
+.card.held{opacity:.75}
+.bar.stop i{background:var(--warn)}
+.ico{min-width:38px;text-align:center}
+.spin{display:inline-block;width:.8em;height:.8em;margin-right:6px;vertical-align:-1px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:rot .8s linear infinite}
+.badge.queued .spin{animation-duration:2.4s;opacity:.7}
+@keyframes rot{to{transform:rotate(360deg)}}
+.bar.busy i{width:35%!important;animation:slide 1.3s ease-in-out infinite}
+@keyframes slide{0%{transform:translateX(-100%)}100%{transform:translateX(290%)}}
+@media (prefers-reduced-motion:reduce){.spin,.bar.busy i{animation:none}}
+#toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:9px 16px;border-radius:10px;opacity:0;transition:opacity .2s;pointer-events:none}
+#toast.on{opacity:1}
+</style>
+</head>
+<body>
+<main>
+<h1>Transcriere audio</h1>
+<div class="row">
+  <label for="lang">Limba înregistrării:</label>
+  <select id="lang">
+    <option value="ro">Română</option>
+    <option value="en">Engleză</option>
+    <option value="ru">Rusă</option>
+    <option value="uk">Ucraineană</option>
+    <option value="fr">Franceză</option>
+    <option value="de">Germană</option>
+    <option value="it">Italiană</option>
+    <option value="es">Spaniolă</option>
+    <option value="auto">Detectare automată</option>
+  </select>
+</div>
+<label class="drop" id="drop">
+  <input type="file" id="file" accept="audio/*,video/*,.m4a,.mp3,.wav,.ogg,.opus,.aac,.flac,.amr,.3gp,.mp4,.mkv,.webm,.mov" multiple hidden>
+  <b>Alege fișiere audio sau video</b>
+  <span>sau trage-le aici · mp3, m4a, wav, ogg, mp4, mkv…</span>
+</label>
+<div id="uploads"></div>
+<div id="qbar" class="qbar" hidden></div>
+<div id="jobs"></div>
+</main>
+<div id="toast"></div>
+<script>
+const $ = s => document.querySelector(s);
+const LANG = {ro:'română',en:'engleză',ru:'rusă',uk:'ucraineană',fr:'franceză',de:'germană',it:'italiană',es:'spaniolă',auto:'automat'};
+const lang = $('#lang');
+try { const l = localStorage.getItem('lang'); if (l && LANG[l]) lang.value = l; } catch (e) {}
+lang.onchange = () => { try { localStorage.setItem('lang', lang.value); } catch (e) {} };
+
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const size = b => b >= 1e9 ? (b/1e9).toFixed(2)+' GB' : b >= 1e6 ? (b/1e6).toFixed(1)+' MB' : Math.max(1, Math.round(b/1e3))+' kB';
+const dur = s => { s = Math.max(0, Math.round(s)); const h = Math.floor(s/3600), m = Math.floor(s%3600/60), x = s%60; return (h ? h+'h ' : '') + (h||m ? m+'m ' : '') + x+'s'; };
+const when = t => new Date(t*1000).toLocaleString('ro-RO', {day:'numeric', month:'short', hour:'2-digit', minute:'2-digit'});
+function toast(t) { const e = $('#toast'); e.textContent = t; e.classList.add('on'); clearTimeout(e._t); e._t = setTimeout(() => e.classList.remove('on'), 1800); }
+
+/* ---- uploads (one at a time, in order) ---- */
+const ups = new Map(), waiting = [];
+let current = null;
+function addFiles(list) {
+  for (const f of list) {
+    const u = {id: Math.random().toString(36).slice(2), file: f, lang: lang.value, sent: 0, state: 'wait'};
+    ups.set(u.id, u); waiting.push(u);
+  }
+  drawUploads(); nextUpload();
+}
+function nextUpload() {
+  if (current || !waiting.length) return;
+  const u = current = waiting.shift();
+  u.state = 'up';
+  const x = u.xhr = new XMLHttpRequest();
+  x.open('POST', 'api/upload?name=' + encodeURIComponent(u.file.name) + '&lang=' + u.lang);
+  x.upload.onprogress = e => { u.sent = e.loaded; drawUploads(); };
+  x.onload = () => {
+    if (x.status === 200) { ups.delete(u.id); refresh(); }
+    else { u.state = 'err'; u.msg = x.responseText || 'HTTP ' + x.status; }
+    done();
+  };
+  x.onerror = () => { u.state = 'err'; u.msg = 'Conexiunea s-a întrerupt.'; done(); };
+  x.onabort = () => { ups.delete(u.id); done(); };
+  x.send(u.file);
+  drawUploads();
+}
+function done() { current = null; drawUploads(); nextUpload(); }
+function drawUploads() {
+  $('#uploads').innerHTML = [...ups.values()].map(u => {
+    const pct = u.file.size ? Math.round(100*u.sent/u.file.size) : 0;
+    const sp = u.state === 'err' ? '' : SPIN;
+    const finishing = u.state === 'up' && pct >= 100;
+    const badge = u.state === 'up' ? (finishing ? 'Se salvează…' : `Se încarcă ${pct}%`) : u.state === 'wait' ? 'Așteaptă' : 'Eroare la încărcare';
+    return `<div class="card"><div class="top"><div><div class="name">${esc(u.file.name)}</div>
+      <div class="meta">${u.state === 'up' ? size(u.sent)+' din ' : ''}${size(u.file.size)} · ${LANG[u.lang]}</div></div>
+      <span class="badge ${u.state}">${sp}${badge}</span></div>
+      ${u.state === 'up' ? `<div class="bar${finishing || !u.sent ? ' busy' : ''}"><i style="width:${pct}%"></i></div>` : ''}
+      ${u.msg ? `<div class="log">${esc(u.msg)}</div>` : ''}
+      <div class="acts"><button class="del" data-act="drop" data-id="${u.id}">${u.state === 'err' ? 'Închide' : 'Anulează'}</button></div></div>`;
+  }).join('');
+}
+window.addEventListener('beforeunload', e => { if (current) { e.preventDefault(); e.returnValue = ''; } });
+
+/* ---- jobs on the server ---- */
+let jobs = [], qpaused = false, srvNow = 0, last = '';
+async function refresh() {
+  try {
+    const r = await fetch('api/jobs', {cache: 'no-store'});
+    const t = await r.text();
+    if (t !== last) { last = t; const d = JSON.parse(t); jobs = d.jobs; qpaused = d.paused; srvNow = d.now; drawJobs(); }
+  } catch (e) {}
+}
+const SPIN = '<span class="spin"></span>';
+const ran = j => (j.finished || (j.paused_at || srvNow)) - j.started - j.paused_total;
+function drawQueue(queue) {
+  const q = $('#qbar');
+  const running = jobs.some(j => j.status === 'running');
+  q.hidden = !queue.length && !running && !qpaused;
+  q.className = 'qbar' + (qpaused ? ' off' : '');
+  const n = queue.length ? `${queue.length} ${queue.length === 1 ? 'fișier' : 'fișiere'} în coadă` : 'Coada e goală';
+  q.innerHTML = qpaused
+    ? `<span>⏸ Coada e pe pauză · ${n}${running ? ' (cel pornit se termină)' : ''}</span><button class="pri" data-act="qresume">▶ Reia coada</button>`
+    : `<span>${n}</span><button data-act="qpause">⏸ Pune coada pe pauză</button>`;
+}
+function drawJobs() {
+  const queue = jobs.filter(j => j.status === 'queued').sort((a, b) => a.rank - b.rank);
+  const order = j => j.status === 'running' ? [0, 0] : j.status === 'queued' ? [1, j.rank] : [2, -(j.finished || j.created)];
+  const list = [...jobs].sort((a, b) => { const x = order(a), y = order(b); return x[0] - y[0] || x[1] - y[1]; });
+  drawQueue(queue);
+  if (!list.length) { $('#jobs').innerHTML = ups.size ? '' : '<div class="empty">Nicio transcriere încă.</div>'; return; }
+  $('#jobs').innerHTML = list.map(j => {
+    let badge, cls = j.status, body = '', acts = '';
+    const meta = [size(j.size), LANG[j.lang] || j.lang, when(j.created)];
+    const id = j.id;
+    if (j.status === 'queued') {
+      const pos = queue.findIndex(x => x.id === id) + 1;
+      if (j.paused) { badge = '⏸ În așteptare'; cls = 'paused'; }
+      else badge = SPIN + (qpaused ? 'Coada e pe pauză' : pos > 1 ? `În coadă (#${pos})` : 'Urmează');
+      meta.push(`locul ${pos} din ${queue.length}`);
+      acts = (j.paused
+          ? `<button class="pri" data-act="resume" data-id="${id}">▶ Reia</button>`
+          : `<button data-act="pause" data-id="${id}">⏸ Pauză</button>`) +
+        (pos > 1 ? `<button class="ico" title="Primul" data-act="move" data-to="top" data-id="${id}">⤒</button>
+          <button class="ico" title="Mai sus" data-act="move" data-to="up" data-id="${id}">↑</button>` : '') +
+        (pos < queue.length ? `<button class="ico" title="Mai jos" data-act="move" data-to="down" data-id="${id}">↓</button>` : '') +
+        `<button class="del" data-act="del" data-id="${id}">Șterge</button>`;
+    } else if (j.status === 'running') {
+      const loading = !j.paused && (!j.progress || j.stage);
+      if (j.paused) { badge = `⏸ Pe pauză ${j.progress}%`; cls = 'paused'; }
+      else badge = SPIN + (j.stage ? 'Verific textul…' : loading ? 'Pornește…' : `Se transcrie ${j.progress}%`);
+      meta.push((j.paused ? 'a rulat ' : 'de ') + dur(ran(j)));
+      body = `<div class="bar${j.paused ? ' stop' : loading ? ' busy' : ''}"><i style="width:${j.progress}%"></i></div>` +
+        (j.stage ? `<div class="prev">${esc(j.stage)}</div>`
+          : j.preview.length ? `<div class="prev">… ${esc(j.preview.join(' '))}</div>` : '');
+      acts = (j.paused
+          ? `<button class="pri" data-act="resume" data-id="${id}">▶ Continuă</button>`
+          : `<button data-act="pause" data-id="${id}">⏸ Pauză</button>`) +
+        `<button class="del" data-act="del" data-id="${id}" data-running="1">Anulează</button>`;
+    } else if (j.status === 'done') {
+      badge = 'Gata';
+      if (j.started && j.finished) meta.push('în ' + dur(ran(j)));
+      if (j.repaired) meta.push(`${j.repaired} ${j.repaired === 1 ? 'pasaj refăcut' : 'pasaje refăcute'} (repetiții)`);
+      acts = `<button class="pri" data-act="copy" data-id="${j.id}">Copiază textul</button>
+        <a class="btn" href="dl/${j.id}/txt?inline=1" target="_blank">Deschide</a>
+        <a class="btn" href="dl/${j.id}/txt">.txt</a><a class="btn" href="dl/${j.id}/srt">.srt</a><a class="btn" href="dl/${j.id}/vtt">.vtt</a>
+        <button data-act="redo" data-id="${j.id}" title="Transcrie din nou fișierul">↻ Refă</button>
+        <button class="del" data-act="del" data-id="${j.id}">Șterge</button>`;
+    } else {
+      badge = 'Eroare';
+      body = `<div class="log">${esc(j.error || '')}</div>`;
+      acts = `<button data-act="retry" data-id="${j.id}">↻ Reîncearcă</button>
+        <button class="del" data-act="del" data-id="${j.id}">Șterge</button>`;
+    }
+    return `<div class="card${j.paused ? ' held' : ''}"><div class="top"><div><div class="name">${esc(j.name)}</div>
+      <div class="meta">${meta.join(' · ')}</div></div><span class="badge ${cls}">${badge}</span></div>
+      ${body}<div class="acts">${acts}</div></div>`;
+  }).join('');
+}
+
+async function copy(id) {
+  const t = await (await fetch('dl/' + id + '/txt?inline=1', {cache: 'no-store'})).text();
+  try {
+    if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(t);
+    else {
+      // Plain http on the LAN is not a secure context, so no Clipboard API.
+      const a = document.createElement('textarea');
+      a.value = t; a.setAttribute('readonly', ''); a.style.cssText = 'position:fixed;top:0;opacity:0';
+      document.body.appendChild(a); a.select(); a.setSelectionRange(0, t.length);
+      const ok = document.execCommand('copy'); a.remove();
+      if (!ok) throw 0;
+    }
+    toast('Text copiat');
+  } catch (e) { window.open('dl/' + id + '/txt?inline=1', '_blank'); }
+}
+
+document.addEventListener('click', async e => {
+  const b = e.target.closest('[data-act]'); if (!b) return;
+  const id = b.dataset.id;
+  if (b.dataset.act === 'drop') {
+    const u = ups.get(id); if (!u) return;
+    if (u.state === 'up') u.xhr.abort();
+    else { const i = waiting.indexOf(u); if (i >= 0) waiting.splice(i, 1); ups.delete(id); drawUploads(); }
+  } else if (b.dataset.act === 'copy') copy(id);
+  else if (b.dataset.act === 'redo') {
+    if (!confirm('Transcriu din nou? Textul de acum se înlocuiește.')) return;
+    await act(`api/jobs/${id}/retry`, 'POST');
+  }
+  else if (b.dataset.act === 'del') {
+    if (!confirm(b.dataset.running ? 'Opresc transcrierea? Ce s-a transcris până acum se pierde.' : 'Șterg transcrierea?')) return;
+    await act('api/jobs/' + id, 'DELETE');
+  } else {
+    const url = {
+      qpause: 'api/queue/pause', qresume: 'api/queue/resume',
+      pause: `api/jobs/${id}/pause`, resume: `api/jobs/${id}/resume`,
+      retry: `api/jobs/${id}/retry`, move: `api/jobs/${id}/move?to=${b.dataset.to}`,
+    }[b.dataset.act];
+    if (url) { b.disabled = true; await act(url, 'POST'); }
+  }
+});
+async function act(url, method) {
+  try {
+    const r = await fetch(url, {method});
+    if (!r.ok) toast(await r.text() || 'Eroare ' + r.status);
+  } catch (e) { toast('Serverul nu răspunde'); }
+  last = ''; refresh();
+}
+
+const file = $('#file'), drop = $('#drop');
+file.onchange = () => { addFiles(file.files); file.value = ''; };
+drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
+drop.ondragleave = () => drop.classList.remove('over');
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); addFiles(e.dataTransfer.files); };
+
+(function poll() {
+  const busy = jobs.some(j => j.status === 'queued' || j.status === 'running');
+  refresh().finally(() => setTimeout(poll, document.hidden ? 15000 : busy ? 1500 : 6000));
+})();
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+</script>
+</body>
+</html>

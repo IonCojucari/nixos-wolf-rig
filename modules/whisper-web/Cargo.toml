@@ -1,0 +1,18 @@
+[package]
+name = "whisper-web"
+version = "0.1.0"
+edition = "2021"
+description = "Web page for the transcribe command: upload, queue, download"
+license = "MIT"
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query", "json"] }
+futures-util = { version = "0.3", default-features = false }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "process", "io-util", "sync", "time"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
