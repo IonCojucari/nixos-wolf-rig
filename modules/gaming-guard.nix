@@ -130,7 +130,17 @@ let
         echo -1
         return
       }
-      echo "$out" | ${pkgs.gnugrep}/bin/grep -c -E ${lib.escapeShellArg "^(${lib.concatStringsSep "|" cfg.busyContainerPrefixes})"} || true
+      n=$(echo "$out" | ${pkgs.gnugrep}/bin/grep -c -E ${lib.escapeShellArg "^(${lib.concatStringsSep "|" cfg.busyContainerPrefixes})"} || true)
+      echo $(( n + $(busy_processes) ))
+    }
+
+    # Processes that make the machine busy (rig.gamingGuard.busyProcesses).
+    # Only running or sleeping ones: a process stopped with SIGSTOP (a paused
+    # transcription) is not using anything but memory, so mining may resume.
+    busy_processes() {
+      ${if cfg.busyProcesses == [ ] then "echo 0" else ''
+        ${pkgs.procps}/bin/pgrep -c -x -r R,S,D ${lib.escapeShellArg "(${lib.concatStringsSep "|" cfg.busyProcesses})"} || true
+      ''}
     }
 
     state=unknown
@@ -157,7 +167,7 @@ let
       [ "$want" = "$state" ] && return 0
 
       if [ "$want" = gaming ]; then
-        echo "gaming-guard: session started -> stopping xmrig, lifting the CPU cap."
+        echo "gaming-guard: session or busy process started -> stopping xmrig, lifting the CPU cap."
         # stop, not the API's pause: pause leaves sixteen threads parked but
         # keeps the 2080 MiB RandomX dataset and every scratchpad resident,
         # and it is the cache footprint rather than the CPU time that hurts a
@@ -273,6 +283,20 @@ in
         `wolf`, lower case, so it never matches). Other modules append their
         own, e.g. "runner-" for GitLab CI jobs, which are as sensitive to
         sixteen RandomX threads and a capped clock as a game is.
+      '';
+    };
+
+    busyProcesses = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "whisper-cli" ];
+      description = ''
+        Process names (exact, as `pgrep -x` sees them) that make the guard
+        treat the machine as busy, the same way a session container does.
+        Modules add their own: modules/whisper.nix adds whisper-cli, so
+        mining stops while a transcription runs, from the web page or the
+        `transcribe` command alike. A process stopped with SIGSTOP does not
+        count.
       '';
     };
 

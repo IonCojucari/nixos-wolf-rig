@@ -138,6 +138,13 @@ in
         pkgs.whisper-cpp-vulkan
         pkgs.ffmpeg-headless
       ];
+
+      # No mining while a transcription runs. Whisper is on the GPU, but
+      # feeding it, the voice detector and ffmpeg are CPU work, and sixteen
+      # RandomX threads on a capped clock slow all of it. The guard's grace
+      # period also covers the short gaps between the passes of one job
+      # (the transcription, then each repaired passage).
+      rig.gamingGuard.busyProcesses = [ "whisper-cli" ];
     }
 
     (lib.mkIf cfg.web.enable {

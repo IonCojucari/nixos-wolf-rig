@@ -749,6 +749,10 @@ const INVENTED: &[&str] = &[
 ];
 /// This many identical segments in a row are a loop, not speech.
 const LOOP_RUN: usize = 3;
+/// ... or this many times within this many segments on either side.
+const LOOP_WINDOW: usize = 12;
+/// Sentences shorter than this (letters) only count as identical runs.
+const LOOP_MIN_CHARS: usize = 15;
 /// At most this many passages are transcribed again per file.
 const MAX_REPAIRS: usize = 40;
 const UNCLEAR: &str = "[pasaj neclar]";
@@ -805,19 +809,36 @@ fn parse_srt(s: &str) -> Vec<Seg> {
 }
 
 /// Index ranges (inclusive) of the passages to transcribe again.
+///
+/// A loop is not always one sentence: a real one from a lecture alternated
+/// two ("încrucișează marginea ... buccinator," / "îndreptându-se în jos și
+/// anterior.") for three minutes. So besides a run of identical segments,
+/// a sentence that comes back LOOP_RUN times within LOOP_WINDOW segments
+/// counts, whatever is between its repeats. Short ones ("Bun.", "Da.") are
+/// only counted as an identical run, since a speaker does repeat those.
 fn suspicious(segs: &[Seg]) -> Vec<(usize, usize)> {
+    let norms: Vec<String> = segs.iter().map(|s| norm(&s.text)).collect();
     let mut bad = vec![false; segs.len()];
     let mut i = 0;
-    while i < segs.len() {
-        let n = norm(&segs[i].text);
+    while i < norms.len() {
         let mut j = i;
-        while j + 1 < segs.len() && !n.is_empty() && norm(&segs[j + 1].text) == n {
+        while j + 1 < norms.len() && !norms[i].is_empty() && norms[j + 1] == norms[i] {
             j += 1;
         }
         if j + 1 - i >= LOOP_RUN {
             bad[i..=j].iter_mut().for_each(|b| *b = true);
         }
         i = j + 1;
+    }
+    for (i, n) in norms.iter().enumerate() {
+        if n.chars().count() < LOOP_MIN_CHARS {
+            continue;
+        }
+        let lo = i.saturating_sub(LOOP_WINDOW);
+        let hi = (i + LOOP_WINDOW + 1).min(norms.len());
+        if norms[lo..hi].iter().filter(|x| *x == n).count() >= LOOP_RUN {
+            bad[i] = true;
+        }
     }
     for (b, s) in bad.iter_mut().zip(segs) {
         *b |= invented(&s.text);
@@ -828,25 +849,32 @@ fn suspicious(segs: &[Seg]) -> Vec<(usize, usize)> {
             continue;
         }
         match ranges.last_mut() {
-            // Neighbours (or one good segment between two bad ones) are one passage.
-            Some((_, end)) if k <= *end + 2 => *end = k,
+            // Neighbours (or a couple of good segments between bad ones) are one passage.
+            Some((_, end)) if k <= *end + 3 => *end = k,
             _ => ranges.push((k, k)),
         }
     }
     ranges
 }
 
-/// The repaired text of a passage: no invented sentences, no repeats.
+/// The repaired text of a passage: no invented sentences, no repeats, the
+/// same rules as suspicious() so a rerun that loops again is cut back to
+/// one copy of each sentence.
 fn clean(segs: Vec<Seg>) -> Vec<Seg> {
     let mut out: Vec<Seg> = Vec::new();
     for s in segs {
         if s.text.is_empty() || invented(&s.text) {
             continue;
         }
-        if out.last().is_some_and(|p| norm(&p.text) == norm(&s.text)) {
-            continue;
+        let n = norm(&s.text);
+        let again = if n.chars().count() >= LOOP_MIN_CHARS {
+            out.iter().rev().take(LOOP_WINDOW).any(|p| norm(&p.text) == n)
+        } else {
+            out.last().is_some_and(|p| norm(&p.text) == n)
+        };
+        if !again {
+            out.push(s);
         }
-        out.push(s);
     }
     out
 }
@@ -1092,4 +1120,81 @@ async fn main() {
         .unwrap_or_else(|e| panic!("listen on {listen}: {e}"));
     eprintln!("whisper-web listening on {listen}");
     axum::serve(listener, router).await.expect("server");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn segs(texts: &[&str]) -> Vec<Seg> {
+        texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| Seg { start: i as f64 * 5.0, end: i as f64 * 5.0 + 5.0, text: t.to_string() })
+            .collect()
+    }
+
+    const A: &str = "Deci, încrucișează marginea interioră a mușcului buccinator,";
+    const B: &str = "îndreptându-se în jos și anterior.";
+
+    #[test]
+    fn identical_run() {
+        let s = segs(&["Început de curs aici.", "X x x x x x x x x x.", "X x x x x x x x x x.", "X x x x x x x x x x.", "Altceva diferit acum."]);
+        assert_eq!(suspicious(&s), vec![(1, 3)]);
+    }
+
+    #[test]
+    fn alternating_loop() {
+        let mut t = vec!["Nervul lingual coboară între mușchii pterigoidieni."];
+        for _ in 0..30 {
+            t.push(A);
+            t.push(B);
+        }
+        t.push("S-a auzit de o boală care se numește sifilis.");
+        let r = suspicious(&segs(&t));
+        assert_eq!(r, vec![(1, 60)]);
+    }
+
+    #[test]
+    fn invented_sentence() {
+        let s = segs(&["Un text normal de curs.", "Nu uitați să dați like și să vă abonați.", "Alt text normal de curs."]);
+        assert_eq!(suspicious(&s), vec![(1, 1)]);
+    }
+
+    #[test]
+    fn short_words_and_real_speech_pass() {
+        let s = segs(&["Bun.", "Fontanela anterioară se închide la doi ani.", "Bun.", "Da.", "Bun.", "Fontanela posterioară la două luni.", "Bun."]);
+        assert!(suspicious(&s).is_empty());
+    }
+
+    #[test]
+    fn clean_cuts_a_rerun_that_loops_again() {
+        let s = segs(&[A, B, A, B, A, "Mulțumesc pentru vizionare!", "Bun.", "Bun.", "Text nou."]);
+        let texts: Vec<String> = clean(s).into_iter().map(|s| s.text).collect();
+        assert_eq!(texts, vec![A, B, "Bun.", "Text nou."]);
+    }
+
+    #[test]
+    fn srt_round_trip() {
+        let s = "1\n00:22:23,800 --> 00:22:40,770\n încrucișează\n\n2\n01:00:00,000 --> 01:00:01,500\n două\nrânduri\n\n";
+        let p = parse_srt(s);
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0].start, 1343.8);
+        assert_eq!(p[1].text, "două rânduri");
+        assert_eq!(fmt_ts(p[1].end, ','), "01:00:01,500");
+    }
+}
+
+#[cfg(test)]
+mod real {
+    /// WW_SRT=file.srt cargo test -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn show_ranges() {
+        let s = std::fs::read_to_string(std::env::var("WW_SRT").unwrap()).unwrap();
+        let segs = super::parse_srt(&s);
+        for (i, j) in super::suspicious(&segs) {
+            println!("{} - {}  ({} segmente)  {:?}", super::fmt_ts(segs[i].start, '.'), super::fmt_ts(segs[j].end, '.'), j + 1 - i, &segs[i].text.chars().take(50).collect::<String>());
+        }
+    }
 }
