@@ -96,6 +96,12 @@ struct Job {
     /// transcribed again (see repair()).
     #[serde(default)]
     repaired: u32,
+    /// Background noise is taken out (WHISPER_DENOISE) before Whisper runs.
+    #[serde(default)]
+    denoise: bool,
+    /// How far that noise removal is, while it runs.
+    #[serde(default)]
+    cleaning: Option<u8>,
 }
 
 /// The job transcribe is running for.
@@ -235,6 +241,7 @@ fn load(dir: &FsPath) -> HashMap<String, Job> {
                     j.paused_total = 0.0;
                     j.preview.clear();
                     j.stage = None;
+                    j.cleaning = None;
                 }
                 jobs.insert(id, j);
             }
@@ -272,9 +279,14 @@ struct UploadQuery {
     name: String,
     #[serde(default = "default_lang")]
     lang: String,
+    #[serde(default = "yes")]
+    denoise: bool,
 }
 fn default_lang() -> String {
     "ro".to_string()
+}
+fn yes() -> bool {
+    true
 }
 
 async fn upload(
@@ -312,6 +324,8 @@ async fn upload(
                 error: None,
                 stage: None,
                 repaired: 0,
+                denoise: q.denoise,
+                cleaning: None,
             };
             app.save(&job);
             app.jobs.lock().unwrap().insert(id, job.clone());
@@ -423,7 +437,17 @@ async fn resume(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<S
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn retry(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<StatusCode, Error> {
+#[derive(Deserialize)]
+struct RetryQuery {
+    /// Redo with the noise removal on or off; the job's setting if absent.
+    denoise: Option<bool>,
+}
+
+async fn retry(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Query(q): Query<RetryQuery>,
+) -> Result<StatusCode, Error> {
     if !matches!(status_of(&app, &id)?, Status::Failed | Status::Done) {
         return Err(conflict("e deja în coadă"));
     }
@@ -444,6 +468,10 @@ async fn retry(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<St
     j.error = None;
     j.stage = None;
     j.repaired = 0;
+    j.cleaning = None;
+    if let Some(d) = q.denoise {
+        j.denoise = d;
+    }
     app.save(j);
     drop(jobs);
     app.wake.notify_one();
@@ -587,6 +615,11 @@ fn progress_of(line: &str) -> Option<u8> {
     line[i + "progress =".len()..].trim().trim_end_matches('%').trim().parse().ok()
 }
 
+/// `denoise: 42%`, from whisper-denoise before Whisper starts.
+fn denoise_of(line: &str) -> Option<u8> {
+    line.strip_prefix("denoise:")?.trim().trim_end_matches('%').trim().parse().ok()
+}
+
 /// Calls `f` with each line, decoded lossily so a stray byte cannot stop the
 /// reader (and with it the pipe, and the process writing into it).
 async fn each_line(r: impl AsyncRead + Unpin, mut f: impl FnMut(&str)) {
@@ -679,9 +712,16 @@ async fn run_transcribe(
     let err_task = tokio::spawn(async move {
         let mut tail = VecDeque::new();
         each_line(stderr, |line| {
-            if let Some(p) = progress_of(line) {
+            if let Some(p) = denoise_of(line) {
                 if report == Report::Live {
-                    a.update(&i, |j| j.progress = p.min(98));
+                    a.update(&i, |j| j.cleaning = Some(p.min(100)));
+                }
+            } else if let Some(p) = progress_of(line) {
+                if report == Report::Live {
+                    a.update(&i, |j| {
+                        j.progress = p.min(98);
+                        j.cleaning = None;
+                    });
                 }
             } else if !line.trim().is_empty() {
                 tail.push_back(line.to_string());
@@ -907,6 +947,7 @@ async fn repair(
     dir: &FsPath,
     input: &str,
     lang: &str,
+    base_env: &[(&str, String)],
     cancel: &mut watch::Receiver<bool>,
 ) -> Result<u32, String> {
     let Ok(srt) = tokio::fs::read_to_string(dir.join("audio.srt")).await else {
@@ -933,12 +974,13 @@ async fn repair(
         });
 
         let prefix = dir.join(format!("repair-{k}"));
-        let env = [
+        let mut env = base_env.to_vec();
+        env.extend([
             ("WHISPER_START", format!("{start:.3}")),
             ("WHISPER_LENGTH", format!("{:.3}", end - start)),
             ("WHISPER_CONTEXT", "0".to_string()),
             ("WHISPER_OUT", prefix.display().to_string()),
-        ];
+        ]);
         let result = run_transcribe(app, id, dir, input, lang, &env, Report::Quiet, cancel).await;
         let srt_path = prefix.with_extension("srt");
         let redone = match result {
@@ -995,27 +1037,32 @@ async fn worker(app: Arc<App>) {
                     j.started = Some(now());
                     j.progress = 0;
                     app.save(j);
-                    Some((j.input.clone(), j.lang.clone()))
+                    Some((j.input.clone(), j.lang.clone(), j.denoise))
                 }
                 _ => None,
             }
         };
-        let Some((input, lang)) = started else {
+        let Some((input, lang, denoise)) = started else {
             *app.current.lock().unwrap() = None;
             continue;
         };
 
         let dir = app.job_dir(&id);
+        // The repaired passages are cleaned the same way, so they sound like
+        // what Whisper heard the first time.
+        let env: Vec<(&str, String)> =
+            if denoise { vec![("WHISPER_DENOISE", "1".to_string())] } else { Vec::new() };
         let outcome = async {
-            run_transcribe(&app, &id, &dir, &input, &lang, &[], Report::Live, &mut cancel).await?;
+            run_transcribe(&app, &id, &dir, &input, &lang, &env, Report::Live, &mut cancel).await?;
             if !dir.join("audio.txt").exists() {
                 return Err("transcribe nu a scris niciun text".to_string());
             }
             app.update(&id, |j| {
                 j.progress = 99;
+                j.cleaning = None;
                 j.stage = Some("Verific dacă s-a blocat pe repetiții…".to_string());
             });
-            repair(&app, &id, &dir, &input, &lang, &mut cancel).await
+            repair(&app, &id, &dir, &input, &lang, &env, &mut cancel).await
         }
         .await;
         *app.current.lock().unwrap() = None;
@@ -1024,6 +1071,7 @@ async fn worker(app: Arc<App>) {
             j.finished = Some(now());
             j.paused = false;
             j.stage = None;
+            j.cleaning = None;
             if let Some(t) = j.paused_at.take() {
                 j.paused_total += now() - t;
             }
@@ -1172,6 +1220,15 @@ mod tests {
         let s = segs(&[A, B, A, B, A, "Mulțumesc pentru vizionare!", "Bun.", "Bun.", "Text nou."]);
         let texts: Vec<String> = clean(s).into_iter().map(|s| s.text).collect();
         assert_eq!(texts, vec![A, B, "Bun.", "Text nou."]);
+    }
+
+    #[test]
+    fn progress_lines() {
+        assert_eq!(denoise_of("denoise: 42%"), Some(42));
+        assert_eq!(denoise_of("denoise: 100%"), Some(100));
+        assert_eq!(progress_of("whisper_print_progress_callback: progress =   7%"), Some(7));
+        assert_eq!(denoise_of("whisper_print_progress_callback: progress =   7%"), None);
+        assert_eq!(progress_of("denoise: 42%"), None);
     }
 
     #[test]

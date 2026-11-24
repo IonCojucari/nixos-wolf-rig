@@ -40,6 +40,10 @@ button:hover,.btn:hover{border-color:var(--acc)}
 .card.held{opacity:.75}
 .bar.stop i{background:var(--warn)}
 .ico{min-width:38px;text-align:center}
+.opt{margin:-2px 0 14px}
+.opt label{display:inline-flex;gap:8px;align-items:center;cursor:pointer}
+.opt input{width:18px;height:18px;margin:0;accent-color:var(--acc)}
+.opt small{display:block;color:var(--mut);font-size:.82rem;margin:2px 0 0 26px}
 .spin{display:inline-block;width:.8em;height:.8em;margin-right:6px;vertical-align:-1px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:rot .8s linear infinite}
 .badge.queued .spin{animation-duration:2.4s;opacity:.7}
 @keyframes rot{to{transform:rotate(360deg)}}
@@ -67,6 +71,10 @@ button:hover,.btn:hover{border-color:var(--acc)}
     <option value="auto">Detectare automată</option>
   </select>
 </div>
+<div class="opt">
+  <label><input type="checkbox" id="denoise" checked> Curăță zgomotul de fond înainte</label>
+  <small>Ajută la înregistrări cu zgomot sau ecou. Dacă vocea abia se aude, debifează: acolo poate șterge și din vorbire.</small>
+</div>
 <label class="drop" id="drop">
   <input type="file" id="file" accept="audio/*,video/*,.m4a,.mp3,.wav,.ogg,.opus,.aac,.flac,.amr,.3gp,.mp4,.mkv,.webm,.mov" multiple hidden>
   <b>Alege fișiere audio sau video</b>
@@ -83,6 +91,9 @@ const LANG = {ro:'română',en:'engleză',ru:'rusă',uk:'ucraineană',fr:'france
 const lang = $('#lang');
 try { const l = localStorage.getItem('lang'); if (l && LANG[l]) lang.value = l; } catch (e) {}
 lang.onchange = () => { try { localStorage.setItem('lang', lang.value); } catch (e) {} };
+const denoise = $('#denoise');
+try { if (localStorage.getItem('denoise') === '0') denoise.checked = false; } catch (e) {}
+denoise.onchange = () => { try { localStorage.setItem('denoise', denoise.checked ? '1' : '0'); } catch (e) {} };
 
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const size = b => b >= 1e9 ? (b/1e9).toFixed(2)+' GB' : b >= 1e6 ? (b/1e6).toFixed(1)+' MB' : Math.max(1, Math.round(b/1e3))+' kB';
@@ -95,7 +106,7 @@ const ups = new Map(), waiting = [];
 let current = null;
 function addFiles(list) {
   for (const f of list) {
-    const u = {id: Math.random().toString(36).slice(2), file: f, lang: lang.value, sent: 0, state: 'wait'};
+    const u = {id: Math.random().toString(36).slice(2), file: f, lang: lang.value, denoise: denoise.checked, sent: 0, state: 'wait'};
     ups.set(u.id, u); waiting.push(u);
   }
   drawUploads(); nextUpload();
@@ -105,7 +116,7 @@ function nextUpload() {
   const u = current = waiting.shift();
   u.state = 'up';
   const x = u.xhr = new XMLHttpRequest();
-  x.open('POST', 'api/upload?name=' + encodeURIComponent(u.file.name) + '&lang=' + u.lang);
+  x.open('POST', 'api/upload?name=' + encodeURIComponent(u.file.name) + '&lang=' + u.lang + '&denoise=' + u.denoise);
   x.upload.onprogress = e => { u.sent = e.loaded; drawUploads(); };
   x.onload = () => {
     if (x.status === 200) { ups.delete(u.id); refresh(); }
@@ -125,7 +136,7 @@ function drawUploads() {
     const finishing = u.state === 'up' && pct >= 100;
     const badge = u.state === 'up' ? (finishing ? 'Se salvează…' : `Se încarcă ${pct}%`) : u.state === 'wait' ? 'Așteaptă' : 'Eroare la încărcare';
     return `<div class="card"><div class="top"><div><div class="name">${esc(u.file.name)}</div>
-      <div class="meta">${u.state === 'up' ? size(u.sent)+' din ' : ''}${size(u.file.size)} · ${LANG[u.lang]}</div></div>
+      <div class="meta">${u.state === 'up' ? size(u.sent)+' din ' : ''}${size(u.file.size)} · ${LANG[u.lang]}${u.denoise ? ' · curățare zgomot' : ''}</div></div>
       <span class="badge ${u.state}">${sp}${badge}</span></div>
       ${u.state === 'up' ? `<div class="bar${finishing || !u.sent ? ' busy' : ''}"><i style="width:${pct}%"></i></div>` : ''}
       ${u.msg ? `<div class="log">${esc(u.msg)}</div>` : ''}
@@ -163,7 +174,9 @@ function drawJobs() {
   if (!list.length) { $('#jobs').innerHTML = ups.size ? '' : '<div class="empty">Nicio transcriere încă.</div>'; return; }
   $('#jobs').innerHTML = list.map(j => {
     let badge, cls = j.status, body = '', acts = '';
-    const meta = [size(j.size), LANG[j.lang] || j.lang, when(j.created)];
+    const meta = [size(j.size), LANG[j.lang] || j.lang];
+    if (j.denoise) meta.push('curățare zgomot');
+    meta.push(when(j.created));
     const id = j.id;
     if (j.status === 'queued') {
       const pos = queue.findIndex(x => x.id === id) + 1;
@@ -178,12 +191,15 @@ function drawJobs() {
         (pos < queue.length ? `<button class="ico" title="Mai jos" data-act="move" data-to="down" data-id="${id}">↓</button>` : '') +
         `<button class="del" data-act="del" data-id="${id}">Șterge</button>`;
     } else if (j.status === 'running') {
-      const loading = !j.paused && (!j.progress || j.stage);
-      if (j.paused) { badge = `⏸ Pe pauză ${j.progress}%`; cls = 'paused'; }
-      else badge = SPIN + (j.stage ? 'Verific textul…' : loading ? 'Pornește…' : `Se transcrie ${j.progress}%`);
+      const cleaning = j.cleaning != null;
+      const pct = cleaning ? j.cleaning : j.progress;
+      const loading = !j.paused && !cleaning && (!j.progress || j.stage);
+      if (j.paused) { badge = `⏸ Pe pauză ${pct}%`; cls = 'paused'; }
+      else badge = SPIN + (cleaning ? `Curăț zgomotul ${pct}%` : j.stage ? 'Verific textul…' : loading ? 'Pornește…' : `Se transcrie ${pct}%`);
       meta.push((j.paused ? 'a rulat ' : 'de ') + dur(ran(j)));
-      body = `<div class="bar${j.paused ? ' stop' : loading ? ' busy' : ''}"><i style="width:${j.progress}%"></i></div>` +
-        (j.stage ? `<div class="prev">${esc(j.stage)}</div>`
+      body = `<div class="bar${j.paused ? ' stop' : loading ? ' busy' : ''}"><i style="width:${pct}%"></i></div>` +
+        (cleaning ? '<div class="prev">Scot zgomotul de fond, apoi pornește transcrierea.</div>'
+          : j.stage ? `<div class="prev">${esc(j.stage)}</div>`
           : j.preview.length ? `<div class="prev">… ${esc(j.preview.join(' '))}</div>` : '');
       acts = (j.paused
           ? `<button class="pri" data-act="resume" data-id="${id}">▶ Continuă</button>`
@@ -197,6 +213,7 @@ function drawJobs() {
         <a class="btn" href="dl/${j.id}/txt?inline=1" target="_blank">Deschide</a>
         <a class="btn" href="dl/${j.id}/txt">.txt</a><a class="btn" href="dl/${j.id}/srt">.srt</a><a class="btn" href="dl/${j.id}/vtt">.vtt</a>
         <button data-act="redo" data-id="${j.id}" title="Transcrie din nou fișierul">↻ Refă</button>
+        <button data-act="redo" data-id="${j.id}" data-denoise="${!j.denoise}" title="Transcrie din nou, ${j.denoise ? 'pe sunetul original' : 'cu zgomotul curățat'}">↻ ${j.denoise ? 'Fără' : 'Cu'} curățare</button>
         <button class="del" data-act="del" data-id="${j.id}">Șterge</button>`;
     } else {
       badge = 'Eroare';
@@ -236,7 +253,7 @@ document.addEventListener('click', async e => {
   } else if (b.dataset.act === 'copy') copy(id);
   else if (b.dataset.act === 'redo') {
     if (!confirm('Transcriu din nou? Textul de acum se înlocuiește.')) return;
-    await act(`api/jobs/${id}/retry`, 'POST');
+    await act(`api/jobs/${id}/retry` + (b.dataset.denoise ? '?denoise=' + b.dataset.denoise : ''), 'POST');
   }
   else if (b.dataset.act === 'del') {
     if (!confirm(b.dataset.running ? 'Opresc transcrierea? Ce s-a transcris până acum se pierde.' : 'Șterg transcrierea?')) return;

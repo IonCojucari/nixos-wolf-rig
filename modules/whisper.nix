@@ -17,6 +17,7 @@
 #
 # Usage:  transcribe lectie.mp4 [limba]     (default language: ro)
 # Env:    WHISPER_CONTEXT=N (default 128, 0 = off), WHISPER_VAD=0 (disable VAD)
+#         WHISPER_DENOISE=1 (take background noise out first, see `denoise`)
 #         WHISPER_START=S WHISPER_LENGTH=S (seconds: only that part of the input;
 #         the timestamps then start at 0), WHISPER_OUT=prefix (default: input
 #         name without its extension)
@@ -39,9 +40,48 @@ let
     sha256 = "11v9zgvwkihs750kmdiswd49q7bwvwfm081sk213mdgfhnvnk8ia";
   };
 
+  # Noise removal before Whisper (WHISPER_DENOISE=1): MossFormer2_SE_48K
+  # from Alibaba's ClearerVoice-Studio (Apache-2.0, code and weights). Of
+  # the enhancement models tried on lecture recordings it was the only one
+  # that helped: Whisper got more of the terms right and stopped looping
+  # on noisy but audible speech. The generative ones (VoiceFixer, StoRM,
+  # MossFormerGAN) made Whisper hear nothing or invent text. On a voice
+  # that is barely there it removes speech too, hence off by default for
+  # `transcribe` and a checkbox on the page.
+  #
+  # Only the model's own module is used, not the clearvoice package, which
+  # pulls in a long list of dependencies for its other models. It runs on
+  # the CPU (about 10x real time): this torch comes from the binary cache,
+  # a ROCm build of it would not.
+  clearerVoice = pkgs.fetchFromGitHub {
+    owner = "modelscope";
+    repo = "ClearerVoice-Studio";
+    rev = "6b3774dc79c46ae8bed2a4fa5f706f0ac8c75c61";
+    sha256 = "0fddcfkzp04p9rj0yg6k3wr2im92qz5rji4wcxps6vkkqymc9k8b";
+  };
+  mossformer2Src = pkgs.runCommand "mossformer2-se-src" { } ''
+    mkdir -p $out
+    cp -r ${clearerVoice}/clearvoice/clearvoice/models/mossformer2_se $out/
+    chmod -R u+w $out
+    # Only used for printing a model summary.
+    sed -i '/from torchinfo import summary/d' $out/mossformer2_se/mossformer2_block.py
+  '';
+  mossformer2Weights = pkgs.fetchurl {
+    name = "mossformer2-se-48k.pt";
+    url = "https://huggingface.co/alibabasglab/MossFormer2_SE_48K/resolve/eff8c97925c8bec812af707814b3e5d777fd4503/last_best_checkpoint.pt";
+    sha256 = "1ii7nbcd6sn6psvrcdz1cvysya0ydgwl2nlw7fs6pg9vfygjns83";
+  };
+  denoise = pkgs.writers.writePython3Bin "whisper-denoise"
+    {
+      libraries = with pkgs.python3Packages; [ torch torchaudio einops rotary-embedding-torch soundfile numpy ];
+      flakeIgnore = [ "E501" ];
+    }
+    (lib.replaceStrings [ "@modelSrc@" "@weights@" ] [ "${mossformer2Src}" "${mossformer2Weights}" ]
+      (builtins.readFile ./whisper-denoise.py));
+
   transcribe = pkgs.writeShellApplication {
     name = "transcribe";
-    runtimeInputs = [ pkgs.ffmpeg-headless pkgs.whisper-cpp-vulkan ];
+    runtimeInputs = [ pkgs.ffmpeg-headless pkgs.whisper-cpp-vulkan denoise ];
     text = ''
       if [ $# -lt 1 ]; then
         echo "usage: transcribe <video-or-audio> [language, default ro]" >&2
@@ -51,7 +91,9 @@ let
       lang="''${2:-ro}"
       out="''${WHISPER_OUT:-''${in%.*}}"
       wav="$(mktemp --suffix=.wav)"
-      trap 'rm -f "$wav"' EXIT
+      raw="$(mktemp --suffix=.wav)"
+      clean="$(mktemp --suffix=.wav)"
+      trap 'rm -f "$wav" "$raw" "$clean"' EXIT
 
       # Vulkan enumerates the 9800X3D's iGPU as device 0 and the RX 9070 XT
       # as device 1, and whisper.cpp takes the first one it sees.
@@ -62,8 +104,18 @@ let
       if [ -n "''${WHISPER_START:-}" ]; then
         range=(-ss "$WHISPER_START" -t "''${WHISPER_LENGTH:?WHISPER_LENGTH goes with WHISPER_START}")
       fi
-      ffmpeg -nostdin -hide_banner -loglevel error -y \
-        -i "$in" "''${range[@]}" -vn -ar 16000 -ac 1 -c:a pcm_s16le "$wav"
+      if [ "''${WHISPER_DENOISE:-0}" = 1 ]; then
+        # The model works at 48 kHz; Whisper gets the result at 16 kHz.
+        ffmpeg -nostdin -hide_banner -loglevel error -y \
+          -i "$in" "''${range[@]}" -vn -ar 48000 -ac 1 -c:a pcm_s16le "$raw"
+        whisper-denoise "$raw" "$clean"
+        ffmpeg -nostdin -hide_banner -loglevel error -y \
+          -i "$clean" -ar 16000 -ac 1 -c:a pcm_s16le "$wav"
+        rm -f "$raw" "$clean"
+      else
+        ffmpeg -nostdin -hide_banner -loglevel error -y \
+          -i "$in" "''${range[@]}" -vn -ar 16000 -ac 1 -c:a pcm_s16le "$wav"
+      fi
 
       # Prime each 30 s window with only ~three sentences of the previous
       # transcript instead of the default 224 tokens. With full priming a
@@ -144,7 +196,9 @@ in
       # RandomX threads on a capped clock slow all of it. The guard's grace
       # period also covers the short gaps between the passes of one job
       # (the transcription, then each repaired passage).
-      rig.gamingGuard.busyProcesses = [ "whisper-cli" ];
+      # The noise removal is all CPU, and next to RandomX it runs some 50
+      # times slower (its threads spin waiting on each other).
+      rig.gamingGuard.busyProcesses = [ "whisper-cli" "whisper-denoise" ];
     }
 
     (lib.mkIf cfg.web.enable {
